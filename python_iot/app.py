@@ -119,6 +119,8 @@ import psycopg2.pool
 import requests
 from flask import Flask, request, jsonify, render_template_string
 
+import ai_client as _ai
+
 # ============================================================
 # LOGGING
 # ============================================================
@@ -175,6 +177,15 @@ AI_CONTEXT_WINDOW_ROWS  = int(os.getenv("AI_CONTEXT_WINDOW_ROWS", "10"))
 
 # API version returned in every response.
 API_VERSION             = "1"
+
+# ── AI Decision Engine (backend-initiated calls to external AI) ───────────────
+# Distinct from the existing AI Gate (/api/v1/*) which handles inbound AI calls.
+# This engine proactively calls an external AI API for each device where
+# ai_mode != 'OFF'. Empty AI_ENDPOINT_URL disables the engine entirely.
+AI_ENDPOINT_URL      = os.getenv("AI_ENDPOINT_URL", "")
+AI_POLL_INTERVAL_SEC = max(10,  int(os.getenv("AI_POLL_INTERVAL_SEC", "60")))   # min 10s
+AI_TIMEOUT_SEC       = max(1,   int(os.getenv("AI_TIMEOUT_SEC", "10")))         # min 1s
+AI_AUTO_COOLDOWN_SEC = max(0,   int(os.getenv("AI_AUTO_COOLDOWN_SEC", "300")))  # 0 = no cooldown
 
 # ── Admin Panel ───────────────────────────────────────────────────────────────
 # HTTP Basic Auth for /admin/* routes.
@@ -2032,6 +2043,175 @@ _ai_gate: Dict[str, Any] = {
 }
 
 # ============================================================
+# AI DECISION ENGINE
+# ============================================================
+
+class AIDecisionEngine:
+    """
+    Proactively calls an external AI API for devices with ai_mode != 'OFF'.
+
+    Modes per device (devices.ai_mode):
+      OFF    — device skipped, no AI call
+      VIEWER — context sent, decision logged, command NOT executed
+      AUTO   — context sent, command executed if policy allows it
+
+    The AI only suggests. is_ai_command_allowed() in ai_client decides
+    whether AUTO execution proceeds (cooldown, FSM state, anti-oscillation).
+    All execution goes through CommandEngine — never direct MQTT.
+
+    Thread: single daemon thread started by start().
+    _last_auto is in-memory only (acceptable for MVP).
+    """
+
+    def __init__(self) -> None:
+        self._started  = False
+        # Per-device: (last_cmd_str, last_executed_at datetime) — in-memory
+        self._last_auto: Dict[str, tuple] = {}
+
+    def start(self) -> None:
+        if self._started:
+            log.warning("[AI-ENGINE] start() called more than once — ignored")
+            return
+        if not AI_ENDPOINT_URL:
+            log.warning("[AI-ENGINE] AI_ENDPOINT_URL not set — engine disabled")
+            return
+        self._started = True
+        log.info(
+            f"[AI-ENGINE] Starting — endpoint={AI_ENDPOINT_URL} "
+            f"poll={AI_POLL_INTERVAL_SEC}s timeout={AI_TIMEOUT_SEC}s "
+            f"auto_cooldown={AI_AUTO_COOLDOWN_SEC}s"
+        )
+        t = threading.Thread(target=self._loop, daemon=True, name="ai-decision")
+        t.start()
+        log.info("✅ AIDecisionEngine iniciado")
+
+    def _loop(self) -> None:
+        # Run first cycle immediately on start, then sleep between subsequent cycles.
+        while True:
+            try:
+                self._run_cycle()
+            except Exception as e:
+                log.error(f"[AI-ENGINE] Cycle error: {e}", exc_info=True)
+            time.sleep(AI_POLL_INTERVAL_SEC)
+
+    def _run_cycle(self) -> None:
+        rows = db.fetchall(
+            "SELECT device_id, ai_mode FROM devices "
+            "WHERE ai_mode != 'OFF' AND COALESCE(enabled, TRUE) = TRUE"
+        )
+        for device_id, ai_mode in rows:
+            try:
+                self._process_device(device_id, ai_mode)
+            except Exception as e:
+                log.error(f"[AI-ENGINE] Error processing {device_id}: {e}")
+
+    def _process_device(self, device_id: str, ai_mode: str) -> None:
+        ctx    = _ai.build_context(device_id, db)
+        req_id = ctx["request_id"]
+
+        log.info(
+            f"[AI-ENGINE] req={req_id[:8]}… device={device_id} mode={ai_mode} "
+            f"state={ctx['fsm_state']} risk={ctx['risk_level']}"
+        )
+
+        decision, error = _ai.get_ai_decision(ctx, AI_ENDPOINT_URL, AI_TIMEOUT_SEC)
+
+        if error:
+            log.warning(f"[AI-ENGINE] req={req_id[:8]}… API error: {error}")
+            self._save_decision(device_id, ai_mode, None, False, None, "FAILED", error)
+            return
+
+        dec_type   = decision["decision"]
+        confidence = decision["confidence"]
+        reason     = decision.get("reason", "")
+        suggested  = decision.get("suggested_cmd")
+
+        log.info(
+            f"[AI-ENGINE] req={req_id[:8]}… decision={dec_type} "
+            f"confidence={confidence:.2f} suggested_cmd={suggested} reason={reason!r}"
+        )
+
+        executed    = False
+        exec_status = None
+        exec_result = None
+
+        if ai_mode == "VIEWER":
+            exec_status = "REJECTED"
+            exec_result = "viewer_mode: suggestions logged only"
+            log.info(f"[AI-ENGINE] VIEWER — logged suggestion: {suggested}")
+
+        elif ai_mode == "AUTO" and dec_type == "EXECUTE" and suggested:
+            last_cmd, last_at = self._last_auto.get(device_id, (None, None))
+            allowed, deny_reason = _ai.is_ai_command_allowed(
+                cmd=suggested,
+                fsm_state=ctx["fsm_state"],
+                last_auto_cmd=last_cmd,
+                last_auto_at=last_at,
+                auto_cooldown_sec=AI_AUTO_COOLDOWN_SEC,
+            )
+            if not allowed:
+                exec_status = "REJECTED"
+                exec_result = deny_reason
+                log.info(f"[AI-ENGINE] AUTO blocked by policy: {deny_reason}")
+            else:
+                result = command_engine.issue(device_id, suggested, issued_by="ai_auto")
+                if "error" not in result:
+                    executed    = True
+                    exec_status = "SUCCESS"
+                    exec_result = result["command_id"]
+                    self._last_auto[device_id] = (suggested, datetime.now(timezone.utc))
+                    log.info(
+                        f"[AI-ENGINE] AUTO executed {suggested} — "
+                        f"device={device_id} cmd_id={result['command_id'][:8]}…"
+                    )
+                else:
+                    exec_status = "FAILED"
+                    exec_result = result["error"]
+                    log.warning(
+                        f"[AI-ENGINE] AUTO failed {suggested} — "
+                        f"device={device_id}: {result['error']}"
+                    )
+
+        self._save_decision(
+            device_id, ai_mode, decision,
+            executed,
+            datetime.now(timezone.utc) if executed else None,
+            exec_status, exec_result,
+        )
+
+    def _save_decision(
+        self,
+        device_id:   str,
+        ai_mode:     str,
+        decision:    Optional[dict],
+        executed:    bool,
+        executed_at: Optional[datetime],
+        exec_status: Optional[str],
+        exec_result: Optional[str],
+    ) -> None:
+        db.execute(
+            "INSERT INTO ai_decisions "
+            "(device_id, ai_mode, decision, confidence, reason, "
+            " suggested_cmd, executed, executed_at, exec_status, exec_result) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                device_id,
+                ai_mode,
+                decision["decision"]            if decision else "ERROR",
+                decision.get("confidence")      if decision else None,
+                decision.get("reason")          if decision else exec_result,
+                decision.get("suggested_cmd")   if decision else None,
+                executed,
+                executed_at,
+                exec_status,
+                exec_result,
+            ),
+        )
+
+
+ai_decision_engine: "AIDecisionEngine" = None
+
+# ============================================================
 # MQTT
 # ============================================================
 
@@ -2879,6 +3059,24 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
   <div id="hist"><span class="meta">Cargando...</span></div>
 </div>
 
+<div class="card">
+  <div class="card-title">Integración IA</div>
+  <div class="row" style="margin-bottom:.75rem">
+    <span class="meta">Modo actual:</span>
+    <span id="ai-mode-badge" class="badge bg2">···</span>
+  </div>
+  <div class="row" style="gap:.5rem;margin-bottom:.6rem">
+    <select id="ai-select" style="flex:1">
+      <option value="OFF">OFF — deshabilitado</option>
+      <option value="VIEWER">VIEWER — solo observa</option>
+      <option value="AUTO">AUTO — ejecuta automáticamente</option>
+    </select>
+    <button onclick="saveAiMode()" style="background:#7c3aed;color:#fff;padding:.5rem 1rem">Guardar</button>
+  </div>
+  <div class="card-title" style="margin-top:.75rem">Última decisión IA</div>
+  <div id="ai-last"><span class="meta">Cargando...</span></div>
+</div>
+
 <script>
 const FSM = {
   PRODUCING:'bg', FLUSHING:'bb', STARTING:'by',
@@ -2961,6 +3159,73 @@ async function send(cmd){
 
 setInterval(poll, 5000);
 poll();
+
+// ── AI Integration ──────────────────────────────────────────────────────────
+const AI_MODE_COLOR = {OFF:'bg2', VIEWER:'bb', AUTO:'bg'};
+const EXEC_COLOR    = {SUCCESS:'#4ade80', REJECTED:'#fbbf24', FAILED:'#f87171'};
+
+let aiPollBusy = false;   // prevent overlapping concurrent requests
+
+async function pollAi(){
+  if(aiPollBusy) return;
+  aiPollBusy = true;
+  try {
+    const r = await fetch('/api/device/'+dev()+'/ai-status');
+    if(!r.ok) return;
+    const s    = await r.json();
+    const mode = s.ai_mode || 'OFF';
+    document.getElementById('ai-select').value = mode;
+    const mb   = document.getElementById('ai-mode-badge');
+    mb.textContent = mode;
+    mb.className   = 'badge '+(AI_MODE_COLOR[mode]||'bg2');
+
+    const el = document.getElementById('ai-last');
+    const ld = s.last_decision;
+    if(ld){
+      const conf = ld.confidence != null ? (ld.confidence*100).toFixed(0)+'%' : '-';
+      const sc   = EXEC_COLOR[ld.exec_status] || '#94a3b8';
+      el.innerHTML = '';
+      // Use textContent for all AI-provided text to prevent XSS
+      const line1 = document.createElement('div');
+      line1.style.fontWeight = '600';
+      line1.textContent = ld.decision + ' (' + conf + ')' +
+          (ld.suggested_cmd ? ' → ' + ld.suggested_cmd : '') +
+          (ld.exec_status   ? ' → ' + ld.exec_status   : '');
+      if(ld.exec_status) line1.style.color = sc;
+      el.appendChild(line1);
+      const line2 = document.createElement('div');
+      line2.className   = 'meta';
+      line2.textContent = ld.reason || '';
+      el.appendChild(line2);
+      const line3 = document.createElement('div');
+      line3.className   = 'meta';
+      line3.textContent = ld.decided_at ? ld.decided_at.replace('T',' ').slice(0,19) : '';
+      el.appendChild(line3);
+    } else {
+      el.innerHTML = '<span class="meta">Sin decisiones registradas</span>';
+    }
+  } catch(e){ console.error('[pollAi]', e); }
+  finally { aiPollBusy = false; }
+}
+
+async function saveAiMode(){
+  const mode = document.getElementById('ai-select').value;
+  try {
+    const r = await fetch('/api/device/'+dev()+'/ai-mode', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({mode})
+    });
+    const data = await r.json();
+    const box  = document.getElementById('resp');
+    box.className   = 'rbox '+(r.ok?'ok':'er');
+    box.textContent = JSON.stringify(data, null, 2);
+    if(r.ok) pollAi();
+  } catch(e){ console.error('[saveAiMode]', e); }
+}
+
+setInterval(pollAi, 10000);
+pollAi();
 </script>
 </body>
 </html>"""
@@ -2985,6 +3250,65 @@ def admin_panel():
         return ("<h2 style='font-family:sans-serif;padding:2rem'>"
                 "No hay dispositivos registrados.</h2>"), 200
     return render_template_string(_ADMIN_PANEL_HTML, devices=devices)
+
+
+# ── AI mode endpoints ─────────────────────────────────────────────────────────
+
+@api.route("/api/device/<device_id>/ai-mode", methods=["POST"])
+def set_device_ai_mode(device_id):
+    """Set the AI operation mode for a device.
+    Body: {"mode": "OFF" | "VIEWER" | "AUTO"}
+    """
+    if not db.fetchall("SELECT 1 FROM devices WHERE device_id = %s", (device_id,)):
+        return jsonify({"error": "device_not_found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    mode = (data.get("mode") or "").upper().strip()
+    if mode not in ("OFF", "VIEWER", "AUTO"):
+        return jsonify({"error": "invalid_mode", "allowed": ["OFF", "VIEWER", "AUTO"]}), 400
+
+    db.execute("UPDATE devices SET ai_mode = %s WHERE device_id = %s", (mode, device_id))
+    log.info(f"[AI-MODE] device={device_id} ai_mode={mode}")
+    return jsonify({"device_id": device_id, "ai_mode": mode})
+
+
+@api.route("/api/device/<device_id>/ai-mode", methods=["GET"])
+def get_device_ai_mode(device_id):
+    rows = db.fetchall("SELECT ai_mode FROM devices WHERE device_id = %s", (device_id,))
+    if not rows:
+        return jsonify({"error": "device_not_found"}), 404
+    return jsonify({"device_id": device_id, "ai_mode": rows[0][0] or "OFF"})
+
+
+@api.route("/api/device/<device_id>/ai-status", methods=["GET"])
+def get_device_ai_status(device_id):
+    """Current AI mode and last recorded decision. Used by the admin panel."""
+    rows = db.fetchall("SELECT ai_mode FROM devices WHERE device_id = %s", (device_id,))
+    if not rows:
+        return jsonify({"error": "device_not_found"}), 404
+
+    ai_mode = rows[0][0] or "OFF"
+    last_dec = db.fetchall(
+        "SELECT decided_at, decision, confidence, reason, "
+        "       suggested_cmd, executed, exec_status, exec_result "
+        "FROM ai_decisions WHERE device_id = %s "
+        "ORDER BY decided_at DESC LIMIT 1",
+        (device_id,),
+    )
+    last_decision = None
+    if last_dec:
+        r = last_dec[0]
+        last_decision = {
+            "decided_at":    r[0].isoformat() if r[0] else None,
+            "decision":      r[1],
+            "confidence":    r[2],
+            "reason":        r[3],
+            "suggested_cmd": r[4],
+            "executed":      r[5],
+            "exec_status":   r[6],
+            "exec_result":   r[7],
+        }
+    return jsonify({"device_id": device_id, "ai_mode": ai_mode, "last_decision": last_decision})
 
 
 def _start_api():
@@ -3025,9 +3349,12 @@ def main():
         log.critical(f"No se pudo conectar al broker: {e}")
         return
 
-    global command_engine
+    global command_engine, ai_decision_engine
     command_engine = CommandEngine(client)
     command_engine.start()
+
+    ai_decision_engine = AIDecisionEngine()
+    ai_decision_engine.start()
 
     log.info("✅ Escuchando MQTT...")
     client.loop_forever()

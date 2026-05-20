@@ -298,6 +298,72 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS client_id    INTEGER REFERENCES cli
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS display_name TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS enabled      BOOLEAN DEFAULT TRUE;
 
+-- Integración IA por dispositivo.
+-- ai_mode es la única fuente de verdad: OFF | VIEWER | AUTO
+-- No se necesita ai_enabled — ai_mode='OFF' cumple ese rol sin ambigüedad.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS ai_mode TEXT DEFAULT 'OFF'
+    CHECK (ai_mode IN ('OFF', 'VIEWER', 'AUTO'));
+
+-- ============================================================
+-- TABLA: ai_decisions
+--
+-- Registro histórico de decisiones del motor IA externo.
+--
+-- Flujo típico por fila:
+--   1. Se inserta la decisión IA (decided_at, ai_mode, decision,
+--      confidence, reason, suggested_cmd).
+--   2. Si corresponde, el backend ejecuta el comando via CommandEngine.
+--   3. La misma fila se actualiza con:
+--        - executed     = TRUE/FALSE
+--        - executed_at  = timestamp de ejecución
+--        - exec_status  = SUCCESS | REJECTED | FAILED
+--        - exec_result  = detalle textual (command_id, motivo, etc.)
+--
+-- OFF    → no se generan filas
+-- VIEWER → sugerencia registrada, executed=FALSE, exec_status=REJECTED
+-- AUTO   → decisión registrada y actualizada con resultado de ejecución
+-- ============================================================
+CREATE TABLE IF NOT EXISTS ai_decisions (
+    id            SERIAL       PRIMARY KEY,
+    device_id     TEXT         NOT NULL
+                  REFERENCES devices(device_id),    -- FK: devices.device_id es PRIMARY KEY
+    decided_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    ai_mode       TEXT         NOT NULL
+                  CHECK (ai_mode IN ('OFF', 'VIEWER', 'AUTO')),
+
+    decision      TEXT         NOT NULL
+                  CHECK (decision IN ('NONE', 'EXECUTE', 'ERROR')),
+
+    confidence    FLOAT,
+    reason        TEXT,
+
+    suggested_cmd TEXT
+                  CHECK (
+                      suggested_cmd IS NULL OR
+                      suggested_cmd IN ('START', 'STOP', 'FLUSH', 'RST')
+                  ),
+    -- Si decision='EXECUTE', debe haber un comando asociado
+    CONSTRAINT ai_decisions_execute_requires_cmd
+        CHECK (
+            (decision = 'EXECUTE' AND suggested_cmd IS NOT NULL)
+            OR (decision IN ('NONE', 'ERROR'))
+        ),
+
+    executed      BOOLEAN      DEFAULT FALSE,
+    executed_at   TIMESTAMPTZ,
+
+    exec_status   TEXT
+                  CHECK (
+                      exec_status IS NULL OR
+                      exec_status IN ('SUCCESS', 'REJECTED', 'FAILED')
+                  ),
+
+    exec_result   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ai_decisions_device
+    ON ai_decisions (device_id, decided_at DESC);
+
 -- ============================================================
 -- TABLA: device_commands
 -- Command Engine v3 — lifecycle: SENT → RECEIVED → ACCEPTED
