@@ -15,7 +15,7 @@ void setup() {
     sensors.begin();
     control.begin();
     commands.begin();
-    comms.begin(commands);
+    comms.begin(commands, sensors);
 
     Serial.println("=== SYSTEM START ===");
 }

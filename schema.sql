@@ -24,11 +24,13 @@ CREATE INDEX IF NOT EXISTS idx_process_device_time
     ON telemetry_process (device_id, time DESC);
 
 CREATE TABLE IF NOT EXISTS telemetry_quality (
-    time            TIMESTAMPTZ     NOT NULL,
-    device_id       TEXT            NOT NULL,
-    tds_in_raw      FLOAT,
-    tds_out_raw     FLOAT,
-    fw_version      TEXT
+    time             TIMESTAMPTZ     NOT NULL,
+    device_id        TEXT            NOT NULL,
+    tds_in_voltage   FLOAT,          -- V, calibrated via analogReadMilliVolts
+    tds_out_voltage  FLOAT,
+    tds_in_ppm       FLOAT,          -- ppm, DFRobot SEN0244 polynomial at tds_temperature
+    tds_out_ppm      FLOAT,
+    fw_version       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_quality_device_time
     ON telemetry_quality (device_id, time DESC);
@@ -79,8 +81,8 @@ CREATE TABLE IF NOT EXISTS metrics (
     delta_pressure_bar  FLOAT,
     flow_perm_lpm       FLOAT,
     flow_rechazo_lpm    FLOAT,
-    tds_in_raw          FLOAT,
-    tds_out_raw         FLOAT,
+    tds_in_ppm          FLOAT,
+    tds_out_ppm         FLOAT,
     cost_per_liter      FLOAT
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_device_time
@@ -171,6 +173,11 @@ CREATE TABLE IF NOT EXISTS device_config (
     target_recovery         FLOAT       DEFAULT 0.65,
     target_efficiency       FLOAT       DEFAULT 0.92,
     daily_target_liters     FLOAT       DEFAULT 0,       -- ← nuevo v3.3 (0 = sin objetivo)
+    -- ── SENSOR CALIBRATION (nuevo en v3.4) ───────────────────────────────────
+    flow_factor_1           FLOAT       DEFAULT 450.0,  -- pulsos/litro caudalímetro permeado
+    flow_factor_2           FLOAT       DEFAULT 450.0,  -- pulsos/litro caudalímetro rechazo
+    tds_temperature         FLOAT       DEFAULT 25.0,   -- °C para compensación temperatura TDS
+    -- ─────────────────────────────────────────────────────────────────────────
     friendly_name           TEXT,
     location                TEXT,
     updated_at              TIMESTAMPTZ DEFAULT NOW()
@@ -419,3 +426,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_commands_one_active_per_device
 -- ALTER TABLE device_status  ADD COLUMN IF NOT EXISTS biz_degradation_label TEXT;
 -- ALTER TABLE device_status  ADD COLUMN IF NOT EXISTS biz_health_age_hours  FLOAT;
 -- CREATE TABLE IF NOT EXISTS business_metrics ( ... ver definición arriba ... );
+
+-- ============================================================
+-- MIGRACIÓN DESDE v3.3 → v3.4 (si ya tenés la DB):
+--
+-- BREAKING: tds_in_raw / tds_out_raw eliminados.
+-- No hay datos históricos reales — tablas borradas y recreadas
+-- limpiamente. Si tuvieras datos que conservar:
+--   1. Renombrar en telemetry_quality con ALTER TABLE ... RENAME COLUMN
+--   2. Agregar columnas faltantes
+--   3. Actualizar columna metrics
+-- ============================================================
+
+-- telemetry_quality — limpiar nomenclatura TDS
+-- ALTER TABLE telemetry_quality DROP   COLUMN IF EXISTS tds_in_raw;
+-- ALTER TABLE telemetry_quality DROP   COLUMN IF EXISTS tds_out_raw;
+-- ALTER TABLE telemetry_quality ADD    COLUMN IF NOT EXISTS tds_in_voltage  FLOAT;
+-- ALTER TABLE telemetry_quality ADD    COLUMN IF NOT EXISTS tds_out_voltage FLOAT;
+-- ALTER TABLE telemetry_quality ADD    COLUMN IF NOT EXISTS tds_in_ppm      FLOAT;
+-- ALTER TABLE telemetry_quality ADD    COLUMN IF NOT EXISTS tds_out_ppm     FLOAT;
+
+-- metrics — alinear nombres con unidades reales
+-- ALTER TABLE metrics RENAME COLUMN tds_in_raw  TO tds_in_ppm;
+-- ALTER TABLE metrics RENAME COLUMN tds_out_raw TO tds_out_ppm;
+
+-- device_config — calibración de sensores por dispositivo
+-- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS flow_factor_1   FLOAT DEFAULT 450.0;
+-- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS flow_factor_2   FLOAT DEFAULT 450.0;
+-- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds_temperature FLOAT DEFAULT 25.0;

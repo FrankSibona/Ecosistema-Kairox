@@ -2,12 +2,14 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include <time.h>
 #include <string.h>
 
 #include "../sensors/sensors.h"
 #include "../control/control.h"
 #include "../commands/commands.h"
+#include <config.h>
 
 // ================= DEVICE ID =================
 // Must be declared before mqttCallback — static free functions only see
@@ -17,7 +19,8 @@ String device_id;
 
 // ================= COMMAND CALLBACK =================
 
-static Commands* s_cmds = nullptr;
+static Commands* s_cmds    = nullptr;
+static Sensors*  s_sensors = nullptr;
 
 // Maps ReceiveResult to a human-readable string for field logs.
 // ACCEPTED(0) DUPLICATE(1) BUSY(2) INVALID_JSON(3) UNKNOWN_COMMAND(4)
@@ -32,23 +35,60 @@ static const char* receiveResultName(ReceiveResult r) {
     }
 }
 
-// Free function required by PubSubClient. s_cmds is set in begin().
-// Compares the full topic against the exact expected pattern
-// "fyntek/{device_id}/cmd" — prevents false positives from suffixes
-// like /cmd/ack or malformed topics like /xcmd.
-// Does NOT publish — ACK is deferred to comms.update() after the
-// FSM decides in the next control.update() call.
+// Free function required by PubSubClient. Dispatches to one of three handlers:
+//   fyntek/{device_id}/cmd          — command from backend → Commands engine
+//   fyntek/{device_id}/config       — retained calibration config → Sensors
+//   fyntek/{device_id}/config/reset — factory reset → Sensors::resetConfig()
+// Does NOT publish — ACK for commands is deferred to comms.update().
 static void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    if (!s_cmds) return;
 
-    char expected[64];
-    snprintf(expected, sizeof(expected), "fyntek/%s/cmd", device_id.c_str());
-    if (strcmp(topic, expected) != 0) return;
+    // ── /cmd ────────────────────────────────────────────────────────────────
+    char cmd_topic[64];
+    snprintf(cmd_topic, sizeof(cmd_topic), "fyntek/%s/cmd", device_id.c_str());
+    if (strcmp(topic, cmd_topic) == 0) {
+        if (!s_cmds) return;
+        ReceiveResult result = s_cmds->receive(payload, length);
+        if (result != ReceiveResult::ACCEPTED) {
+            Serial.print("[CMD] recv rechazado: ");
+            Serial.println(receiveResultName(result));
+        }
+        return;
+    }
 
-    ReceiveResult result = s_cmds->receive(payload, length);
-    if (result != ReceiveResult::ACCEPTED) {
-        Serial.print("[CMD] recv rechazado: ");
-        Serial.println(receiveResultName(result));
+    // ── /config/reset ────────────────────────────────────────────────────────
+    char rst_topic[72];
+    snprintf(rst_topic, sizeof(rst_topic), "fyntek/%s/config/reset", device_id.c_str());
+    if (strcmp(topic, rst_topic) == 0) {
+        if (s_sensors) s_sensors->resetConfig();
+        return;
+    }
+
+    // ── /config ──────────────────────────────────────────────────────────────
+    // Retained message: broker delivers it immediately on reconnect.
+    // Uses current config values as fallback for any missing field (partial update).
+    char cfg_topic[64];
+    snprintf(cfg_topic, sizeof(cfg_topic), "fyntek/%s/config", device_id.c_str());
+    if (strcmp(topic, cfg_topic) == 0) {
+        if (!s_sensors) return;
+
+        StaticJsonDocument<256> doc;
+        DeserializationError err = deserializeJson(doc, payload, length);
+        if (err) {
+            Serial.print("[CFG] JSON inválido: ");
+            Serial.println(err.c_str());
+            return;
+        }
+
+        // Missing fields fall back to current config — safe partial updates.
+        SensorConfig cur = s_sensors->getConfig();
+        SensorConfig incoming;
+        incoming.flow_factor_1   = doc["flow_factor_1"]   | cur.flow_factor_1;
+        incoming.flow_factor_2   = doc["flow_factor_2"]   | cur.flow_factor_2;
+        incoming.tds_temperature = doc["tds_temperature"] | cur.tds_temperature;
+        incoming.updated_at      = doc["updated_at"]      | (unsigned long)0;
+
+        s_sensors->setConfig(incoming);
+        return;
     }
 }
 
@@ -139,6 +179,8 @@ void Comms::reconnect() {
         Serial.println("✅ MQTT conectado");
 
         mqttClient.subscribe(baseTopic("cmd").c_str());
+        mqttClient.subscribe(baseTopic("config").c_str());
+        mqttClient.subscribe(baseTopic("config/reset").c_str());
 
         // 🔥 SNAPSHOT REAL
         sendSnapshot = true;
@@ -150,7 +192,7 @@ void Comms::reconnect() {
 
 // ================= INIT =================
 
-void Comms::begin(Commands &cmds) {
+void Comms::begin(Commands &cmds, Sensors &s) {
 
     Serial.println("[COMMS] Init");
 
@@ -161,7 +203,8 @@ void Comms::begin(Commands &cmds) {
 
     setupWiFi();
 
-    s_cmds = &cmds;
+    s_cmds    = &cmds;
+    s_sensors = &s;
     mqttClient.setServer(mqtt_server, mqtt_port);
     mqttClient.setCallback(mqttCallback);
 }
@@ -216,15 +259,15 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
 
         // ===== QUALITY =====
         {
-            String json = "{";
-            json += "\"device_id\":\"" + device_id + "\",";
-            json += "\"fw_version\":\"" + String(fw_version) + "\",";
-            json += "\"ts\":" + String(ts) + ",";
-            json += "\"tds_in_ppm\":" + String(s.getTDS1()) + ",";
-            json += "\"tds_out_ppm\":" + String(s.getTDS2());
-            json += "}";
-
-            mqttClient.publish(baseTopic("quality").c_str(), json.c_str());
+            char json[256];
+            snprintf(json, sizeof(json),
+                "{\"device_id\":\"%s\",\"fw_version\":\"%s\",\"ts\":%ld,"
+                "\"tds_in_voltage\":%.4f,\"tds_in_ppm\":%.1f,"
+                "\"tds_out_voltage\":%.4f,\"tds_out_ppm\":%.1f}",
+                device_id.c_str(), fw_version, ts,
+                s.getTDS1Voltage(), s.getTDS1Ppm(),
+                s.getTDS2Voltage(), s.getTDS2Ppm());
+            mqttClient.publish(baseTopic("quality").c_str(), json);
         }
 
         // ===== STATE =====
@@ -303,15 +346,15 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
 
         lastQuality = now;
 
-        String json = "{";
-        json += "\"device_id\":\"" + device_id + "\",";
-        json += "\"fw_version\":\"" + String(fw_version) + "\",";
-        json += "\"ts\":" + String(ts) + ",";
-        json += "\"tds_in_ppm\":" + String(s.getTDS1()) + ",";
-        json += "\"tds_out_ppm\":" + String(s.getTDS2());
-        json += "}";
-
-        mqttClient.publish(baseTopic("quality").c_str(), json.c_str());
+        char json[256];
+        snprintf(json, sizeof(json),
+            "{\"device_id\":\"%s\",\"fw_version\":\"%s\",\"ts\":%ld,"
+            "\"tds_in_voltage\":%.4f,\"tds_in_ppm\":%.1f,"
+            "\"tds_out_voltage\":%.4f,\"tds_out_ppm\":%.1f}",
+            device_id.c_str(), fw_version, ts,
+            s.getTDS1Voltage(), s.getTDS1Ppm(),
+            s.getTDS2Voltage(), s.getTDS2Ppm());
+        mqttClient.publish(baseTopic("quality").c_str(), json);
     }
 
     // ================= STATE =================

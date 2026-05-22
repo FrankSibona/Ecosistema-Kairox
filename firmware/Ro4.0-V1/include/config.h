@@ -28,8 +28,13 @@
 #define PIN_TDS1 34
 #define PIN_TDS2 35
 
-// ================= CALIBRACIÓN =================
-#define FLOW_K 450.0
+// ================= CALIBRACIÓN DE SENSORES =================
+// Valores default cargados en NVS al primer arranque.
+// Actualizables en runtime vía MQTT fyntek/{device_id}/config.
+// flow_factor = pulsos/litro (convención: Hz/(L/s) × 60).
+// Ej. YF-S201: 450 pulsos/litro. Ajustar según datasheet del sensor.
+#define FLOW_FACTOR_DEFAULT     450.0f
+#define TDS_TEMPERATURE_DEFAULT  25.0f  // °C — compensación térmica TDS (nominal)
 
 // ================= FSM =================
 #define LOW_PUMP_FILL_TIME   10000
@@ -43,7 +48,7 @@
 
 #define TDS_DELAY            3600000
 #define MIN_TIME_BETWEEN_FLUSH 14400000
-#define TDS_LIMIT 2.0
+#define TDS_LIMIT_PPM 500.0f  // ppm — umbral referencia (no usado en FSM actual)
 
 // ================= FILTROS =================
 #define DEMAND_FILTER_TIME   3000   // 3s

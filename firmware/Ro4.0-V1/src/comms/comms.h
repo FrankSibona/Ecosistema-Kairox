@@ -6,11 +6,12 @@
 
 class Sensors;
 class Control;
-class Commands;  // full definition in commands/commands.h, included by comms.cpp
+class Commands;
 
 class Comms {
 public:
-    void begin(Commands &cmds);
+    // sensors is stored for config delivery from mqttCallback.
+    void begin(Commands &cmds, Sensors &s);
     void update(Sensors &s, Control &c, Commands &cmds);
 
 private:

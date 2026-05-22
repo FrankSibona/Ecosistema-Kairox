@@ -79,7 +79,7 @@ def build_context(device_id: str, db: Any) -> dict:
     )
 
     qual = db.fetchall(
-        """SELECT tds_in_raw, tds_out_raw
+        """SELECT tds_in_ppm, tds_out_ppm
            FROM telemetry_quality WHERE device_id = %s
            ORDER BY time DESC LIMIT 1""",
         (device_id,),
@@ -144,8 +144,8 @@ def build_context(device_id: str, db: Any) -> dict:
         })
 
     if qual:
-        ctx["metrics"]["tds_in_raw"]  = qual[0][0]
-        ctx["metrics"]["tds_out_raw"] = qual[0][1]
+        ctx["metrics"]["tds_in_ppm"]  = qual[0][0]
+        ctx["metrics"]["tds_out_ppm"] = qual[0][1]
 
     ctx["active_alerts"] = [
         {"code": r[0], "message": r[1], "severity": r[2]}

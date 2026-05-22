@@ -514,10 +514,10 @@ class KPIEngine:
         delta_p         = (p_mem - p_brine)      if p_mem and p_brine else None
 
         quality    = cls._last_quality.get(device_id, {})
-        tds_in     = validate_float(quality.get("tds_in_raw"),  0, 5)
-        tds_out    = validate_float(quality.get("tds_out_raw"), 0, 5)
+        tds_in     = validate_float(quality.get("tds_in_ppm"),  0, 5000)
+        tds_out    = validate_float(quality.get("tds_out_ppm"), 0, 5000)
         efficiency = None
-        if tds_in and tds_in > 0.05:
+        if tds_in and tds_in > 10.0:  # minimum 10 ppm for meaningful rejection ratio
             efficiency = 1.0 - (tds_out / tds_in) if tds_out is not None else None
 
         config         = cls._get_config(device_id)
@@ -534,8 +534,8 @@ class KPIEngine:
             "delta_pressure_bar": delta_p,
             "flow_perm_lpm":      flow_p,
             "flow_rechazo_lpm":   flow_r,
-            "tds_in_raw":         tds_in,
-            "tds_out_raw":        tds_out,
+            "tds_in_ppm":         tds_in,
+            "tds_out_ppm":        tds_out,
             "cost_per_liter":     cost_per_liter,
         }
 
@@ -1574,14 +1574,22 @@ class MessageProcessor:
         self._run_analytics(device_id, timestamp, data)
 
     def _handle_quality(self, device_id, timestamp, data):
-        tds_in  = validate_float(data.get("tds_in_ppm"),  0, 5)
-        tds_out = validate_float(data.get("tds_out_ppm"), 0, 5)
+        tds_in_v   = validate_float(data.get("tds_in_voltage"),  0, 5)
+        tds_out_v  = validate_float(data.get("tds_out_voltage"), 0, 5)
+        tds_in_ppm = validate_float(data.get("tds_in_ppm"),  0, 5000)
+        tds_out_ppm= validate_float(data.get("tds_out_ppm"), 0, 5000)
         db.execute(
-            "INSERT INTO telemetry_quality (time,device_id,tds_in_raw,tds_out_raw,fw_version) "
-            "VALUES (%s,%s,%s,%s,%s)",
-            (timestamp, device_id, tds_in, tds_out, data.get("fw_version", "")),
+            "INSERT INTO telemetry_quality "
+            "(time,device_id,tds_in_voltage,tds_out_voltage,tds_in_ppm,tds_out_ppm,fw_version) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (timestamp, device_id,
+             tds_in_v, tds_out_v, tds_in_ppm, tds_out_ppm,
+             data.get("fw_version", "")),
         )
-        KPIEngine.update_quality_cache(device_id, {"tds_in_raw": tds_in, "tds_out_raw": tds_out})
+        KPIEngine.update_quality_cache(device_id, {
+            "tds_in_ppm":  tds_in_ppm,
+            "tds_out_ppm": tds_out_ppm,
+        })
 
     def _handle_state(self, device_id, timestamp, data):
         state = data.get("state", "UNKNOWN")
@@ -1659,13 +1667,13 @@ class MessageProcessor:
             db.execute(
                 "INSERT INTO metrics "
                 "(time,device_id,recovery,efficiency,rejection_ratio,delta_pressure_bar,"
-                "flow_perm_lpm,flow_rechazo_lpm,tds_in_raw,tds_out_raw,cost_per_liter) "
+                "flow_perm_lpm,flow_rechazo_lpm,tds_in_ppm,tds_out_ppm,cost_per_liter) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (timestamp, device_id,
                  metrics["recovery"],        metrics["efficiency"],
                  metrics["rejection_ratio"], metrics["delta_pressure_bar"],
                  metrics["flow_perm_lpm"],   metrics["flow_rechazo_lpm"],
-                 metrics["tds_in_raw"],      metrics["tds_out_raw"],
+                 metrics["tds_in_ppm"],      metrics["tds_out_ppm"],
                  metrics["cost_per_liter"]),
             )
 
@@ -2023,6 +2031,7 @@ class CommandEngine:
 # Set in main() after MQTT client connects.
 # Flask routes return 503 while this is None.
 command_engine: "CommandEngine" = None
+mqtt_client = None  # paho client — set in main(); used to publish retained config
 
 # Per-device timestamp of last AI-issued command.
 # IN-MEMORY: lost on backend restart. The DB unique partial index
@@ -2316,7 +2325,8 @@ def require_admin_key(f):
 def get_config(device_id):
     rows = db.fetchall(
         "SELECT pump_power_kw,cost_kwh,cost_water_m3,target_recovery,"
-        "target_efficiency,daily_target_liters,friendly_name,location "
+        "target_efficiency,daily_target_liters,friendly_name,location,"
+        "flow_factor_1,flow_factor_2,tds_temperature "
         "FROM device_config WHERE device_id=%s",
         (device_id,)
     )
@@ -2324,33 +2334,65 @@ def get_config(device_id):
         return jsonify({"error": "device not found"}), 404
     r = rows[0]
     return jsonify({
-        "pump_power_kw": r[0], "cost_kwh": r[1], "cost_water_m3": r[2],
-        "target_recovery": r[3], "target_efficiency": r[4],
-        "daily_target_liters": r[5], "friendly_name": r[6], "location": r[7],
+        "pump_power_kw":       r[0],  "cost_kwh":          r[1],
+        "cost_water_m3":       r[2],  "target_recovery":   r[3],
+        "target_efficiency":   r[4],  "daily_target_liters": r[5],
+        "friendly_name":       r[6],  "location":          r[7],
+        "flow_factor_1":       r[8],  "flow_factor_2":     r[9],
+        "tds_temperature":     r[10],
     })
 
 @api.route("/api/config/<device_id>", methods=["POST"])
 def set_config(device_id):
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
+    ff1  = float(data.get("flow_factor_1",  450.0))
+    ff2  = float(data.get("flow_factor_2",  450.0))
+    tds_t = float(data.get("tds_temperature", 25.0))
     db.execute(
         "INSERT INTO device_config "
         "(device_id,pump_power_kw,cost_kwh,cost_water_m3,"
-        "target_recovery,target_efficiency,daily_target_liters,friendly_name,location,updated_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
+        "target_recovery,target_efficiency,daily_target_liters,"
+        "flow_factor_1,flow_factor_2,tds_temperature,"
+        "friendly_name,location,updated_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
         "ON CONFLICT (device_id) DO UPDATE SET "
         "pump_power_kw=EXCLUDED.pump_power_kw, cost_kwh=EXCLUDED.cost_kwh, "
         "cost_water_m3=EXCLUDED.cost_water_m3, target_recovery=EXCLUDED.target_recovery, "
         "target_efficiency=EXCLUDED.target_efficiency, "
         "daily_target_liters=EXCLUDED.daily_target_liters, "
+        "flow_factor_1=EXCLUDED.flow_factor_1, flow_factor_2=EXCLUDED.flow_factor_2, "
+        "tds_temperature=EXCLUDED.tds_temperature, "
         "friendly_name=EXCLUDED.friendly_name, location=EXCLUDED.location, updated_at=NOW()",
         (device_id,
          data.get("pump_power_kw", 0.75),     data.get("cost_kwh", 0.12),
          data.get("cost_water_m3", 0.80),     data.get("target_recovery", 0.65),
          data.get("target_efficiency", 0.92), data.get("daily_target_liters", 0),
+         ff1, ff2, tds_t,
          data.get("friendly_name", ""),       data.get("location", "")),
     )
     KPIEngine.invalidate_config(device_id)
+    _publish_device_config(device_id, ff1, ff2, tds_t)
     return jsonify({"status": "ok"})
+
+
+def _publish_device_config(device_id: str, ff1: float, ff2: float, tds_t: float):
+    """Publish retained sensor calibration config to the device via MQTT.
+
+    Retained so the device receives it immediately on reconnect.
+    updated_at is the canonical version field — firmware applies only if newer.
+    """
+    if not mqtt_client:
+        return
+    import json as _json
+    import time as _time
+    payload = _json.dumps({
+        "flow_factor_1":   ff1,
+        "flow_factor_2":   ff2,
+        "tds_temperature": tds_t,
+        "updated_at":      int(_time.time()),
+    })
+    mqtt_client.publish(f"fyntek/{device_id}/config", payload, retain=True)
+    log.info(f"[{device_id}] Config MQTT publicada: ff1={ff1} ff2={ff2} tds_t={tds_t}")
 
 @api.route("/api/baseline/<device_id>", methods=["GET"])
 def get_baseline(device_id):
@@ -2722,15 +2764,19 @@ def get_device_context(device_id):
     ]
 
     qrow = db.fetchall(
-        "SELECT time, tds_in_raw, tds_out_raw FROM telemetry_quality "
+        "SELECT time, tds_in_voltage, tds_out_voltage, tds_in_ppm, tds_out_ppm "
+        "FROM telemetry_quality "
         "WHERE device_id = %s ORDER BY time DESC LIMIT 1",
         (device_id,)
     )
     quality = None
     if qrow:
         quality = {
-            "sampled_at_utc": qrow[0][0].isoformat(),
-            "tds_in_raw": qrow[0][1], "tds_out_raw": qrow[0][2],
+            "sampled_at_utc":  qrow[0][0].isoformat(),
+            "tds_in_voltage":  qrow[0][1],
+            "tds_out_voltage": qrow[0][2],
+            "tds_in_ppm":      qrow[0][3],
+            "tds_out_ppm":     qrow[0][4],
         }
 
     irow = db.fetchall(
@@ -3349,7 +3395,8 @@ def main():
         log.critical(f"No se pudo conectar al broker: {e}")
         return
 
-    global command_engine, ai_decision_engine
+    global command_engine, ai_decision_engine, mqtt_client
+    mqtt_client    = client
     command_engine = CommandEngine(client)
     command_engine.start()
 
