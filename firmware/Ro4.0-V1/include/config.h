@@ -36,6 +36,14 @@
 #define FLOW_FACTOR_DEFAULT     450.0f
 #define TDS_TEMPERATURE_DEFAULT  25.0f  // °C — compensación térmica TDS (nominal)
 
+// ── NVS config integrity ──────────────────────────────────────────────────────
+// CFG_MAGIC is written alongside calibration data in NVS namespace "kx_cfg".
+// On load, if magic or version don't match, the entire stored config is
+// discarded and safe defaults are used.  Bump CFG_VERSION whenever the
+// SensorConfig layout or semantics change to auto-invalidate stale NVS data.
+#define CFG_MAGIC    0x4B524F58U   // 'K','R','O','X' — identifies KAIROX config block
+#define CFG_VERSION  1U            // increment on struct layout changes
+
 // ================= FSM =================
 #define LOW_PUMP_FILL_TIME   10000
 #define PRESSURE_CHECK_TIME   5000

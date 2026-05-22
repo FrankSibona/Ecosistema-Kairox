@@ -2,18 +2,24 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <config.h>
 
 // ── Sensor calibration config ────────────────────────────────────────────────
 // Pushed from backend via MQTT fyntek/{device_id}/config (retained).
 // Persisted in NVS namespace "kx_cfg" so it survives reboots.
-// updated_at is the authoritative version field: config is applied only when
-// incoming.updated_at > current.updated_at (or incoming has no timestamp).
+//
+// Integrity: magic and version are stored alongside calibration data in NVS.
+// loadConfig() rejects any block where magic != CFG_MAGIC or version != CFG_VERSION.
+// updated_at is the authoritative freshness field: config is applied only when
+// incoming.updated_at > current.updated_at (or incoming carries no timestamp).
 
 struct SensorConfig {
-    float         flow_factor_1   = 450.0f;  // pulsos/litro — caudalímetro permeado
-    float         flow_factor_2   = 450.0f;  // pulsos/litro — caudalímetro rechazo
-    float         tds_temperature = 25.0f;   // °C — compensación térmica TDS
-    unsigned long updated_at      = 0;       // unix timestamp del último update
+    uint32_t      magic           = CFG_MAGIC;             // integrity sentinel
+    uint32_t      version         = CFG_VERSION;           // layout version
+    float         flow_factor_1   = FLOW_FACTOR_DEFAULT;   // pulsos/litro — caudalímetro permeado
+    float         flow_factor_2   = FLOW_FACTOR_DEFAULT;   // pulsos/litro — caudalímetro rechazo
+    float         tds_temperature = TDS_TEMPERATURE_DEFAULT; // °C — compensación térmica TDS
+    unsigned long updated_at      = 0;                     // unix timestamp del último update
 };
 
 class Sensors {

@@ -1,6 +1,6 @@
 #include "sensors.h"
-#include <config.h>
 #include <math.h>  // isnan, isinf
+// config.h included transitively via sensors.h
 
 // ── Statics ──────────────────────────────────────────────────────────────────
 volatile unsigned long Sensors::pulsesQ1 = 0;
@@ -40,37 +40,59 @@ void Sensors::saveTotals() {
 void Sensors::loadConfig() {
     Preferences p;
     p.begin("kx_cfg", true);
-    _cfg.flow_factor_1   = p.getFloat("ff1",   FLOW_FACTOR_DEFAULT);
-    _cfg.flow_factor_2   = p.getFloat("ff2",   FLOW_FACTOR_DEFAULT);
-    _cfg.tds_temperature = p.getFloat("tds_t", TDS_TEMPERATURE_DEFAULT);
-    _cfg.updated_at      = p.getULong("ts",    0);
+
+    // Read integrity fields first. If they don't match, discard everything —
+    // the rest of the stored data may be partially written or from old firmware.
+    uint32_t stored_magic   = p.getUInt("magic",   0);
+    uint32_t stored_version = p.getUInt("version", 0);
+
+    if (stored_magic != CFG_MAGIC || stored_version != CFG_VERSION) {
+        p.end();
+        Serial.printf("[CFG] NVS: magic=0x%08X ver=%u — inválido, usando defaults\n",
+                      stored_magic, stored_version);
+        _cfg = SensorConfig{};
+        return;
+    }
+
+    SensorConfig loaded;
+    loaded.flow_factor_1   = p.getFloat("ff1",   FLOW_FACTOR_DEFAULT);
+    loaded.flow_factor_2   = p.getFloat("ff2",   FLOW_FACTOR_DEFAULT);
+    loaded.tds_temperature = p.getFloat("tds_t", TDS_TEMPERATURE_DEFAULT);
+    loaded.updated_at      = p.getULong("ts",    0);
     p.end();
 
-    if (!isValidConfig(_cfg)) {
-        Serial.println("[CFG] NVS corrupta o fuera de rango — usando defaults");
+    if (!isValidConfig(loaded)) {
+        Serial.println("[CFG] NVS: valores fuera de rango — usando defaults");
         _cfg = SensorConfig{};
-    } else {
-        Serial.printf("[CFG] Cargado: ff1=%.1f ff2=%.1f tds_t=%.1f ts=%lu\n",
-                      _cfg.flow_factor_1, _cfg.flow_factor_2,
-                      _cfg.tds_temperature, _cfg.updated_at);
+        return;
     }
+
+    _cfg = loaded;
+    Serial.printf("[CFG] Cargado: ff1=%.1f ff2=%.1f tds_t=%.1f ts=%lu\n",
+                  _cfg.flow_factor_1, _cfg.flow_factor_2,
+                  _cfg.tds_temperature, _cfg.updated_at);
 }
 
 void Sensors::saveConfig() {
     Preferences p;
     p.begin("kx_cfg", false);
-    p.putFloat("ff1",   _cfg.flow_factor_1);
-    p.putFloat("ff2",   _cfg.flow_factor_2);
-    p.putFloat("tds_t", _cfg.tds_temperature);
-    p.putULong("ts",    _cfg.updated_at);
+    p.putUInt("magic",   _cfg.magic);
+    p.putUInt("version", _cfg.version);
+    p.putFloat("ff1",    _cfg.flow_factor_1);
+    p.putFloat("ff2",    _cfg.flow_factor_2);
+    p.putFloat("tds_t",  _cfg.tds_temperature);
+    p.putULong("ts",     _cfg.updated_at);
     p.end();
 }
 
 // ── Config management ─────────────────────────────────────────────────────────
 
-// Validates all fields. Rejects NaN, inf, and out-of-range values.
-// Called before applying OR before persisting — no invalid state can sneak in.
+// Validates magic, version, and all float fields.
+// A freshly constructed SensorConfig{} always passes (defaults are valid).
+// An MQTT-received config also passes (magic/version initialized by default ctor).
+// A corrupted NVS block fails on magic/version before floats are even checked.
 bool Sensors::isValidConfig(const SensorConfig& c) {
+    if (c.magic != CFG_MAGIC || c.version != CFG_VERSION) return false;
     auto inRange = [](float v, float lo, float hi) -> bool {
         return !isnan(v) && !isinf(v) && v >= lo && v <= hi;
     };

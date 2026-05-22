@@ -101,8 +101,8 @@ The backend POSTs the following JSON body on each call.
 | `pressure_membrane` | `float` \| `null` | bar | Membrane differential pressure (aggregated) |
 | `volume_perm_l` | `float` \| `null` | L | Total cumulative permeate volume |
 | `volume_rechazo_l` | `float` \| `null` | L | Total cumulative reject volume |
-| `tds_in_raw` | `float` \| `null` | raw | Feed water TDS (conductivity raw value) |
-| `tds_out_raw` | `float` \| `null` | raw | Permeate TDS (conductivity raw value) |
+| `tds_in_ppm` | `float` \| `null` | ppm | Feed water TDS — temperature-compensated (DFRobot SEN0244 polynomial) |
+| `tds_out_ppm` | `float` \| `null` | ppm | Permeate TDS — temperature-compensated |
 | `recovery` | `float` \| `null` | 0–1 | Water recovery ratio: permeate / (permeate + reject) |
 | `efficiency` | `float` \| `null` | 0–1 | Membrane rejection efficiency |
 | `risk_score` | `float` \| `null` | 0–100 | Numeric risk score (backing the risk_level category) |
@@ -140,8 +140,8 @@ The backend POSTs the following JSON body on each call.
     "pressure_membrane": 8.2,
     "volume_perm_l":    24150.5,
     "volume_rechazo_l": 9820.3,
-    "tds_in_raw":       1.8,
-    "tds_out_raw":      0.04,
+    "tds_in_ppm":       320.0,
+    "tds_out_ppm":      7.5,
     "recovery":         0.20,
     "efficiency":       0.978,
     "risk_score":       74.0,
@@ -316,14 +316,14 @@ Expected response:
 ```
 Input:
   fsm_state:    PRODUCING
-  metrics.tds_out_raw: 0.09  (threshold ~0.05)
+  metrics.tds_out_ppm: 180  (threshold ~100 ppm for this installation)
   active_alerts: [{"code": "MEMBRANE_SCALING", ...}]
 
 Expected response:
   decision: EXECUTE
   suggested_cmd: FLUSH
   confidence: 0.82
-  reason: "Output TDS elevated at 0.09, membrane scaling alert active — flush recommended"
+  reason: "Output TDS elevated at 180 ppm, membrane scaling alert active — flush recommended"
 ```
 
 ### System stable — no action
@@ -416,8 +416,8 @@ Content-Type: application/json
     "pressure_membrane": 7.1,
     "volume_perm_l":     24890.0,
     "volume_rechazo_l":  10200.0,
-    "tds_in_raw":        1.6,
-    "tds_out_raw":       0.06,
+    "tds_in_ppm":        285.0,
+    "tds_out_ppm":       10.9,
     "recovery":          0.35,
     "efficiency":        0.963,
     "risk_score":        48.0,
