@@ -174,12 +174,16 @@ float Sensors::median5(const float* buf) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 void Sensors::begin() {
-    pinMode(PIN_D1, INPUT_PULLDOWN);
-    pinMode(PIN_D2, INPUT_PULLDOWN);
-    pinMode(PIN_D3, INPUT_PULLDOWN);
-    pinMode(PIN_D4, INPUT_PULLDOWN);
-    pinMode(PIN_D5, INPUT_PULLDOWN);
-    pinMode(PIN_D6, INPUT_PULLDOWN);
+    // Float switches wired to GND — INPUT_PULLUP: open=HIGH, closed=LOW.
+    // T2A (D1): colgando=HIGH → demanda. T1B (D2): arriba=HIGH → crudo OK.
+    // T1A (D5): colgando=HIGH → cisterna baja → bomba pozo ON.
+    // D4 (presostato): kept separate — verify NC/NO type and wiring before changing.
+    pinMode(PIN_D1, INPUT_PULLUP);
+    pinMode(PIN_D2, INPUT_PULLUP);
+    pinMode(PIN_D3, INPUT_PULLUP);
+    pinMode(PIN_D4, INPUT_PULLDOWN);  // presostato — confirmar tipo antes de cambiar
+    pinMode(PIN_D5, INPUT_PULLUP);
+    pinMode(PIN_D6, INPUT_PULLUP);
 
     pinMode(PIN_Q1, INPUT_PULLDOWN);
     pinMode(PIN_Q2, INPUT_PULLDOWN);
@@ -287,10 +291,11 @@ bool Sensors::getD4() { return d4; }
 bool Sensors::getD5() { return d5; }
 bool Sensors::getD6() { return d6; }
 
-bool Sensors::getDemand()    { return d1; }
-bool Sensors::getCrudoOK()   { return d2; }
-bool Sensors::getDoseOK()    { return d3; }
-bool Sensors::getPresostato(){ return d4; }
+bool Sensors::getDemand()        { return d1; }
+bool Sensors::getCrudoOK()       { return d2; }
+bool Sensors::getDoseOK()        { return d3; }
+bool Sensors::getPresostato()    { return d4; }
+bool Sensors::getNivelBajoPozo() { return d5; }
 
 bool Sensors::demanda()          { return d1; }
 bool Sensors::crudoDisponible()  { return d2; }

@@ -3,20 +3,20 @@
 // ================= PINES =================
 
 // Relés
-#define PIN_R1 4
-#define PIN_R2 16
-#define PIN_R3 17
-#define PIN_R4 18
-#define PIN_R5 19
-#define PIN_R6 2
+#define PIN_R1 4   // bomba baja presión (pumpLow)
+#define PIN_R2 16  // bomba alta presión (pumpHigh)
+#define PIN_R3 17  // bomba de pozo     (pumpInlet)
+#define PIN_R4 18  // dosificación      (pumpDose — sin uso)
+#define PIN_R5 19  // válvula flush     (valveFlush)
+#define PIN_R6 2   // válvula entrada   (valveInlet)
 
 // Digitales
-#define PIN_D1 27
-#define PIN_D2 26
-#define PIN_D3 25
-#define PIN_D4 33
-#define PIN_D5 32
-#define PIN_D6 23
+#define PIN_D1 27  // demanda de agua
+#define PIN_D2 26  // agua cruda disponible
+#define PIN_D3 25  // dosificación OK
+#define PIN_D4 33  // presostato
+#define PIN_D5 32  // flotante nivel bajo pozo
+#define PIN_D6 23  // reserva
 
 // Caudal
 #define PIN_Q1 14

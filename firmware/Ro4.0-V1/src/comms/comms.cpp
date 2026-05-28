@@ -310,7 +310,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
             json += "\"crudo_ok\":" + String(s.getD2()) + ",";
             json += "\"dose_ok\":" + String(s.getD3()) + ",";
             json += "\"presostato\":" + String(s.getD4()) + ",";
-            json += "\"reserva1\":" + String(s.getD5()) + ",";
+            json += "\"flotante_pozo\":" + String(s.getD5()) + ",";
             json += "\"reserva2\":" + String(s.getD6());
             json += "}";
 
@@ -417,7 +417,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
         json += "\"crudo_ok\":" + String(s.getD2()) + ",";
         json += "\"dose_ok\":" + String(s.getD3()) + ",";
         json += "\"presostato\":" + String(s.getD4()) + ",";
-        json += "\"reserva1\":" + String(s.getD5()) + ",";
+        json += "\"flotante_pozo\":" + String(s.getD5()) + ",";
         json += "\"reserva2\":" + String(s.getD6());
         json += "}";
 

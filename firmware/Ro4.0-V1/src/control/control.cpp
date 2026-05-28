@@ -5,9 +5,11 @@
 void Control::begin() {
     pinMode(PIN_R1, OUTPUT);
     pinMode(PIN_R2, OUTPUT);
+    pinMode(PIN_R3, OUTPUT);
     pinMode(PIN_R5, OUTPUT);
     pinMode(PIN_R6, OUTPUT);
 
+    digitalWrite(PIN_R3, LOW);
     stopAll();
 }
 
@@ -218,6 +220,13 @@ void Control::update(Sensors &s, Commands &cmds) {
     if (retryCount > 0 && millis() - retryTimer < RETRY_DELAY) {
         return;
     }
+
+    // ===== BOMBA DE POZO — control directo, independiente del FSM =====
+    // D5 HIGH (flotante nivel bajo activo) → PIN_R3 ON
+    // D5 LOW  (cisterna llena)             → PIN_R3 OFF
+    bool nivelBajo = s.getNivelBajoPozo();
+    outputs.pumpInlet = nivelBajo;
+    digitalWrite(PIN_R3, nivelBajo);
 }
 
 // ================= COMMAND VALIDATION =================

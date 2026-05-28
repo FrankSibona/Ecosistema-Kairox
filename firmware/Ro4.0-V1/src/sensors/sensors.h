@@ -53,6 +53,7 @@ public:
     bool getCrudoOK();
     bool getDoseOK();
     bool getPresostato();
+    bool getNivelBajoPozo();   // D5 — flotante nivel bajo; HIGH = cisterna baja → bomba pozo ON
 
     bool demanda();
     bool crudoDisponible();
