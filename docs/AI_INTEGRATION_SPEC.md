@@ -1,9 +1,9 @@
 # KAIROX — AI Integration Specification
 
-**Version:** 1.0  
+**Version:** 2.0  
 **Audience:** External AI engine developer  
-**Backend version:** KAIROX v3.4  
-**Last updated:** 2026-05-20
+**Backend version:** KAIROX v3.4+  
+**Last updated:** 2026-05-27
 
 ---
 
@@ -11,7 +11,7 @@
 
 KAIROX is an industrial IoT platform for monitoring, automation, and diagnostics of reverse osmosis (RO) water treatment systems.
 
-The backend periodically sends operational context for each managed device to an external AI API. The AI engine analyzes this context and returns a **suggested decision**. The AI does **not** directly control any hardware.
+The backend periodically sends raw operational telemetry for each managed device to an external AI API. The AI engine analyzes this telemetry and returns a **suggested decision**. The AI does **not** directly control any hardware.
 
 The execution chain is:
 
@@ -21,6 +21,18 @@ KAIROX backend → AI API (suggestion) → backend policy layer → optional exe
 
 **The AI role is advisory.** The backend applies independent safety rules before acting on any suggestion. The AI can always be overridden, disabled, or ignored.
 
+### Separation of concerns
+
+| Responsibility | Owner |
+|---------------|-------|
+| Telemetry acquisition | ESP32 firmware |
+| Persistence, buffering, polling rate control | KAIROX backend |
+| Inference, anomaly detection, diagnostics | **AI engine** |
+| Command execution safety | KAIROX backend policy layer |
+| Physical actuation | ESP32 firmware |
+
+The backend sends **raw sensor data only** — no pre-computed risk scores, health labels, or diagnostic summaries. All inference is the AI's responsibility.
+
 ---
 
 ## 2. System architecture
@@ -28,16 +40,33 @@ KAIROX backend → AI API (suggestion) → backend policy layer → optional exe
 ### Data flow
 
 ```
-ESP32 firmware
-  └─ MQTT telemetry (1 Hz)
-       └─ KAIROX Backend
-            └─ AI Decision Engine (poll every N seconds)
+ESP32 firmware (1 Hz MQTT)
+  └─ KAIROX Backend
+       ├─ Persists all telemetry to PostgreSQL
+       └─ AI Decision Engine (poll every AI_POLL_INTERVAL_SEC)
+            └─ Builds telemetry window payload
                  └─ POST /your-endpoint  ← your API receives this
                       └─ AI response (JSON)
                            └─ Validation + Policy Layer
                                 └─ CommandEngine (optional)
                                      └─ MQTT command → ESP32
 ```
+
+### Polling model
+
+**KAIROX controls the polling rate. The AI does not control when it is called.**
+
+- Firmware publishes telemetry at 1 Hz continuously
+- Backend persists every sample to the database
+- Every `AI_POLL_INTERVAL_SEC` seconds, the backend builds a context payload and calls the AI API
+- The AI receives a window of recent samples, not a single point snapshot
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AI_POLL_INTERVAL_SEC` | `60` | Seconds between AI calls per device (min: 10) |
+| `AI_WINDOW_SECONDS` | `60` | How far back the telemetry window looks |
+| `AI_SAMPLE_PERIOD_SEC` | `1` | Minimum seconds between consecutive samples in window |
+| `AI_WINDOW_MAX_SAMPLES` | `120` | Hard cap on samples per payload |
 
 ### AI modes per device
 
@@ -74,50 +103,47 @@ The KAIROX backend calls your API as follows:
 
 The backend POSTs the following JSON body on each call.
 
-### Schema
+### Top-level schema
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `request_id` | `string` (UUID4) | Unique identifier for this specific request. Use for tracing across logs. |
+| `request_id` | `string` (UUID4) | Unique identifier for this request. Log it for end-to-end traceability. |
 | `device_id` | `string` | Unique device identifier derived from hardware MAC address. |
-| `timestamp` | `string` (ISO 8601 UTC) | Time of context generation. |
-| `fsm_state` | `string` | Current FSM state of the device. See [Section 7](#7-fsm-states). |
-| `connectivity` | `"ONLINE"` \| `"OFFLINE"` | `ONLINE` if last telemetry was received within 90 seconds. |
-| `risk_level` | `"LOW"` \| `"MEDIUM"` \| `"HIGH"` \| `"CRITICAL"` \| `"UNKNOWN"` | Composite risk assessment computed by KAIROX diagnostics engine. |
-| `health_status` | `"HEALTHY"` \| `"WARNING"` \| `"CRITICAL"` \| `"UNKNOWN"` | Device health category. |
-| `health_message` | `string` \| `null` | Human-readable description of the current health condition. May be `null`. |
+| `timestamp` | `string` (ISO 8601 UTC) | Time of context generation on the backend. |
+| `fsm_state` | `string` | Current FSM state. See [Section 7](#7-fsm-states). |
+| `connectivity` | `"ONLINE"` \| `"OFFLINE"` \| `"UNKNOWN"` | `ONLINE` if last telemetry was received within 90 seconds. |
 | `seconds_since_seen` | `integer` \| `null` | Seconds elapsed since last telemetry message. `null` if never seen. |
-| `metrics` | `object` | Raw sensor readings and computed KPIs. See sub-schema below. |
-| `active_alerts` | `array` | Diagnostic alerts active in the last hour. May be empty. |
+| `telemetry_window` | `object` | Rolling window of recent raw sensor samples. See sub-schema below. |
 
-### `metrics` sub-schema
+### `telemetry_window` sub-schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `window_seconds` | `integer` | Depth of the window in seconds (configured by KAIROX operator). |
+| `sample_period_seconds` | `integer` | Minimum gap between consecutive samples. |
+| `samples` | `array` | Ordered array of sample objects (ascending by `ts`). May be empty if device has no recent data. |
+
+### Sample object schema
+
+Each element of `samples` contains one time-stamped sensor reading. Any field may be `null` if the sensor did not produce data at that timestamp.
 
 | Field | Type | Unit | Description |
 |-------|------|------|-------------|
+| `ts` | `string` (ISO 8601 UTC) | — | Timestamp of this sample |
 | `flow_perm_lpm` | `float` \| `null` | L/min | Permeate (purified water) flow rate |
 | `flow_rechazo_lpm` | `float` \| `null` | L/min | Reject (brine) flow rate |
-| `pressure_in_bar` | `float` \| `null` | bar | Inlet pressure (membrane feed) |
-| `pressure_out_bar` | `float` \| `null` | bar | Outlet pressure (brine side) |
-| `pressure_membrane` | `float` \| `null` | bar | Membrane differential pressure (aggregated) |
-| `volume_perm_l` | `float` \| `null` | L | Total cumulative permeate volume |
-| `volume_rechazo_l` | `float` \| `null` | L | Total cumulative reject volume |
-| `tds_in_ppm` | `float` \| `null` | ppm | Feed water TDS — temperature-compensated (DFRobot SEN0244 polynomial) |
+| `pressure_in_bar` | `float` \| `null` | bar | Inlet pressure (membrane feed side) |
+| `pressure_out_bar` | `float` \| `null` | bar | Outlet pressure (brine/concentrate side) |
+| `pressure_membrane_bar` | `float` \| `null` | bar | Differential pressure across membrane (`pressure_in - pressure_out`). `null` if either pressure is missing. |
+| `volume_perm_l` | `float` \| `null` | L | Cumulative permeate volume |
+| `volume_rechazo_l` | `float` \| `null` | L | Cumulative reject volume |
+| `tds_in_voltage` | `float` \| `null` | V | Raw TDS sensor voltage — feed water |
+| `tds_out_voltage` | `float` \| `null` | V | Raw TDS sensor voltage — permeate |
+| `tds_in_ppm` | `float` \| `null` | ppm | Feed water TDS — temperature-compensated |
 | `tds_out_ppm` | `float` \| `null` | ppm | Permeate TDS — temperature-compensated |
-| `recovery` | `float` \| `null` | 0–1 | Water recovery ratio: permeate / (permeate + reject) |
-| `efficiency` | `float` \| `null` | 0–1 | Membrane rejection efficiency |
-| `risk_score` | `float` \| `null` | 0–100 | Numeric risk score (backing the risk_level category) |
-| `liters_today` | `float` \| `null` | L | Permeate produced today |
-| `waste_pct` | `float` \| `null` | % | Waste water percentage today |
-
-### `active_alerts` array element schema
-
-```json
-{
-  "code":     "MEMBRANE_FOULING",
-  "message":  "High differential pressure with low flow",
-  "severity": "WARNING"
-}
-```
+| `recovery` | `float` \| `null` | 0–1 | `flow_perm / (flow_perm + flow_rechazo)`. `null` if flows unavailable. |
+| `efficiency` | `float` \| `null` | 0–1 | `1 - (tds_out / tds_in)`. `null` if TDS unavailable or `tds_in = 0`. |
+| `waste_pct` | `float` \| `null` | % | `flow_rechazo / (flow_perm + flow_rechazo) × 100`. |
 
 ### Realistic example payload
 
@@ -125,45 +151,56 @@ The backend POSTs the following JSON body on each call.
 {
   "request_id":         "f3a1c9d2-7e45-4b2a-a831-bc09ef112034",
   "device_id":          "ESP32_ECBA88C92DF4",
-  "timestamp":          "2026-05-20T14:32:07.441Z",
+  "timestamp":          "2026-05-27T15:32:07Z",
   "fsm_state":          "PRODUCING",
   "connectivity":       "ONLINE",
-  "risk_level":         "HIGH",
-  "health_status":      "WARNING",
-  "health_message":     "Membrane fouling detected: rising differential pressure over 4 hours",
-  "seconds_since_seen": 3,
-  "metrics": {
-    "flow_perm_lpm":    1.2,
-    "flow_rechazo_lpm": 4.8,
-    "pressure_in_bar":  8.6,
-    "pressure_out_bar": 0.4,
-    "pressure_membrane": 8.2,
-    "volume_perm_l":    24150.5,
-    "volume_rechazo_l": 9820.3,
-    "tds_in_ppm":       320.0,
-    "tds_out_ppm":      7.5,
-    "recovery":         0.20,
-    "efficiency":       0.978,
-    "risk_score":       74.0,
-    "liters_today":     312.0,
-    "waste_pct":        80.0
-  },
-  "active_alerts": [
-    {
-      "code":     "MEMBRANE_FOULING",
-      "message":  "Differential pressure rising, flow declining",
-      "severity": "WARNING"
-    },
-    {
-      "code":     "LOW_RECOVERY",
-      "message":  "Recovery below threshold (20% vs target 65%)",
-      "severity": "WARNING"
-    }
-  ]
+  "seconds_since_seen": 2,
+  "telemetry_window": {
+    "window_seconds":        60,
+    "sample_period_seconds": 1,
+    "samples": [
+      {
+        "ts":                    "2026-05-27T15:31:08Z",
+        "flow_perm_lpm":         1.85,
+        "flow_rechazo_lpm":      4.10,
+        "pressure_in_bar":       7.8,
+        "pressure_out_bar":      0.4,
+        "pressure_membrane_bar": 7.4,
+        "volume_perm_l":         24887.0,
+        "volume_rechazo_l":      10198.0,
+        "tds_in_voltage":        1.82,
+        "tds_out_voltage":       0.22,
+        "tds_in_ppm":            410.0,
+        "tds_out_ppm":           41.0,
+        "recovery":              0.3109,
+        "efficiency":            0.9,
+        "waste_pct":             68.9
+      },
+      {
+        "ts":                    "2026-05-27T15:31:09Z",
+        "flow_perm_lpm":         1.87,
+        "flow_rechazo_lpm":      4.12,
+        "pressure_in_bar":       7.9,
+        "pressure_out_bar":      0.4,
+        "pressure_membrane_bar": 7.5,
+        "volume_perm_l":         24888.0,
+        "volume_rechazo_l":      10199.0,
+        "tds_in_voltage":        1.83,
+        "tds_out_voltage":       0.23,
+        "tds_in_ppm":            412.0,
+        "tds_out_ppm":           43.0,
+        "recovery":              0.3122,
+        "efficiency":            0.8956,
+        "waste_pct":             68.8
+      }
+    ]
+  }
 }
 ```
 
-> **Note on missing fields:** Some metrics may be `null` if the device has not yet produced data for that field (e.g., a freshly connected device). The AI must handle `null` values gracefully without raising errors.
+> **Note on empty windows:** If the device has not sent telemetry recently (e.g., connectivity just restored), `samples` will be an empty array `[]`. The AI must handle this gracefully.
+
+> **Note on null fields:** Any individual field within a sample may be `null` if the corresponding sensor did not produce data at that moment. Treat `null` the same as missing data.
 
 ---
 
@@ -193,9 +230,9 @@ The AI must return a JSON object with **exactly** the following fields. **No add
 
 ```json
 {
-  "decision":     "NONE",
-  "confidence":   0.94,
-  "reason":       "System operating within normal parameters",
+  "decision":      "NONE",
+  "confidence":    0.94,
+  "reason":        "All 60 samples within normal parameters — flow stable, TDS nominal",
   "suggested_cmd": null
 }
 ```
@@ -204,9 +241,9 @@ The AI must return a JSON object with **exactly** the following fields. **No add
 
 ```json
 {
-  "decision":     "EXECUTE",
-  "confidence":   0.89,
-  "reason":       "Membrane fouling indicators rising — preventive flush recommended",
+  "decision":      "EXECUTE",
+  "confidence":    0.89,
+  "reason":        "TDS output rising over last 60s (41→68 ppm), differential pressure increasing — preventive flush recommended",
   "suggested_cmd": "FLUSH"
 }
 ```
@@ -215,9 +252,9 @@ The AI must return a JSON object with **exactly** the following fields. **No add
 
 ```json
 {
-  "decision":     "EXECUTE",
-  "confidence":   0.91,
-  "reason":       "Stopping system",
+  "decision":      "EXECUTE",
+  "confidence":    0.91,
+  "reason":        "Stopping system",
   "suggested_cmd": "STOP",
   "model_version": "v2.1"
 }
@@ -239,9 +276,11 @@ These are recommendations for correct and safe AI behavior, not mechanical const
 
 4. **Respect FSM semantics.** Each command is only valid in certain states (see [Section 8](#8-valid-commands)). Suggesting `START` when the system is already `PRODUCING` will be rejected by the policy layer.
 
-5. **Respond `NONE` under uncertainty.** If connectivity is `OFFLINE`, health is `UNKNOWN`, or key metrics are missing, prefer `NONE` unless there is a specific, evidence-backed reason to act.
+5. **Respond `NONE` under uncertainty.** If connectivity is `OFFLINE`, `samples` is empty, or key metrics are all `null`, prefer `NONE` unless there is a specific evidence-backed reason to act.
 
-6. **Keep reasons concise and actionable.** The `reason` field appears in operator logs. A useful reason is: `"TDS output 0.08 (threshold 0.05) — flush recommended"`. An unhelpful reason is: `"Anomaly detected"`.
+6. **Use the full window.** The telemetry window is provided precisely so the AI can detect trends. A single anomalous sample is less meaningful than a consistent pattern across 30–60 samples.
+
+7. **Keep reasons concise and actionable.** The `reason` field appears in operator logs. A useful reason is: `"TDS output rising 41→68 ppm over 60 samples — flush recommended"`. An unhelpful reason is: `"Anomaly detected"`. Include specific values when possible.
 
 ---
 
@@ -257,7 +296,7 @@ The `fsm_state` field reflects the current state of the device's finite state ma
 | `FLUSHING` | Post-cycle membrane flush in progress. Lasts approximately 60 seconds. |
 | `STOPPING` | Graceful shutdown transition (brief, immediately moves to `IDLE`). |
 | `FAULT` | System locked out after repeated startup failures. Requires `RST` to recover. |
-| `OFFLINE` / `UNKNOWN` | `fsm_state` will be `"UNKNOWN"` if the backend has not received a state update since startup. Not a firmware state — a backend observation. |
+| `UNKNOWN` | Backend has not received a state update since startup. Not a firmware state — a backend observation. |
 
 ---
 
@@ -293,69 +332,56 @@ The backend records every decision (including blocked ones) in its `ai_decisions
 
 ## 10. Example use cases
 
-These are representative scenarios the AI is expected to handle:
+These are representative scenarios the AI is expected to handle using only the telemetry window.
 
-### HIGH risk — stop system
-
-```
-Input:
-  fsm_state:    PRODUCING
-  risk_level:   CRITICAL
-  health_message: "No permeate flow detected for 45 seconds while pump active"
-  metrics.flow_perm_lpm: 0.0
-
-Expected response:
-  decision: EXECUTE
-  suggested_cmd: STOP
-  confidence: 0.95
-  reason: "Zero permeate flow in PRODUCING state for >45s — system failure, stopping"
-```
-
-### Elevated output TDS — flush
+### Trend detection — rising TDS, recommend flush
 
 ```
 Input:
-  fsm_state:    PRODUCING
-  metrics.tds_out_ppm: 180  (threshold ~100 ppm for this installation)
-  active_alerts: [{"code": "MEMBRANE_SCALING", ...}]
+  fsm_state: PRODUCING
+  samples: 60 samples over 60 seconds
+    first 30 samples: tds_out_ppm ~40–45 ppm
+    last 30 samples:  tds_out_ppm ~70–85 ppm (rising trend)
+    pressure_membrane_bar stable at 7.4 bar
 
 Expected response:
   decision: EXECUTE
   suggested_cmd: FLUSH
-  confidence: 0.82
-  reason: "Output TDS elevated at 180 ppm, membrane scaling alert active — flush recommended"
+  confidence: 0.87
+  reason: "TDS output rose from 42 to 83 ppm over last 60s — membrane scaling likely, flush recommended"
+```
+
+### Zero permeate flow in PRODUCING — stop
+
+```
+Input:
+  fsm_state: PRODUCING
+  samples: 30 samples
+    flow_perm_lpm: 0.0 across all samples
+    pressure_in_bar: 7.5 bar (pump running)
+
+Expected response:
+  decision: EXECUTE
+  suggested_cmd: STOP
+  confidence: 0.96
+  reason: "Zero permeate flow for 30 consecutive samples while pump active — possible blockage or membrane failure"
 ```
 
 ### System stable — no action
 
 ```
 Input:
-  fsm_state:    PRODUCING
-  risk_level:   LOW
-  metrics.recovery: 0.64
-  metrics.efficiency: 0.97
-  active_alerts: []
+  fsm_state: PRODUCING
+  samples: 60 samples, all within normal bands
+    flow_perm_lpm: 1.8–2.1
+    tds_out_ppm: 38–44
+    recovery: 0.30–0.33
 
 Expected response:
   decision: NONE
-  confidence: 0.97
-  reason: "All parameters within normal range"
+  confidence: 0.95
+  reason: "All parameters stable over 60 samples — flow, TDS, and recovery within normal range"
   suggested_cmd: null
-```
-
-### Persistent fault — reset
-
-```
-Input:
-  fsm_state:    FAULT
-  health_status: CRITICAL
-  health_message: "Maximum retries exceeded — system locked"
-
-Expected response:
-  decision: EXECUTE
-  suggested_cmd: RST
-  confidence: 0.88
-  reason: "System in FAULT state — resetting to allow restart attempt"
 ```
 
 ### Device offline — no action
@@ -364,12 +390,28 @@ Expected response:
 Input:
   connectivity: OFFLINE
   fsm_state:    UNKNOWN
+  telemetry_window.samples: []
 
 Expected response:
   decision: NONE
   confidence: 0.99
-  reason: "Device offline — insufficient data to make a safe decision"
+  reason: "Device offline — no telemetry available, cannot make a safe decision"
   suggested_cmd: null
+```
+
+### Fault state — reset
+
+```
+Input:
+  fsm_state: FAULT
+  connectivity: ONLINE
+  samples: present but all from before the fault transition
+
+Expected response:
+  decision: EXECUTE
+  suggested_cmd: RST
+  confidence: 0.88
+  reason: "Device in FAULT state — resetting to allow restart attempt"
 ```
 
 ---
@@ -378,15 +420,16 @@ Expected response:
 
 | Topic | Recommendation |
 |-------|---------------|
-| **Latency** | Target < 3 seconds response time. The default timeout is 10 seconds; exceeding it counts as a failure. |
-| **Determinism** | For a given context input, the decision should be stable across calls. Stochastic outputs are harder to audit and debug in industrial settings. |
-| **Null tolerance** | Any metric may be `null`. The model must degrade gracefully — not error — when values are missing. |
+| **Latency** | Target < 3 seconds response time. Default timeout is 10 seconds; exceeding it counts as a failure and is logged. |
+| **Temporal reasoning** | Use the full sample window for trend detection. A single anomalous sample is not sufficient evidence for an `EXECUTE` decision. |
+| **Null tolerance** | Any metric in any sample may be `null`. The model must degrade gracefully — not error — when values are missing. |
+| **Empty window** | `samples: []` means no recent telemetry. Always respond `NONE` when the window is empty. |
 | **OFFLINE handling** | When `connectivity = "OFFLINE"`, always respond `NONE`. There is no actionable information. |
 | **UNKNOWN state** | When `fsm_state = "UNKNOWN"`, respond `NONE` unless another strong signal warrants action. |
 | **Logging** | Log the `request_id` from every incoming request. This enables KAIROX operators to correlate AI behavior with device events. |
-| **Reason field** | Write reasons that a field technician can act on. Include the specific metric value that triggered the decision when applicable. |
+| **Reason field** | Write reasons that a field technician can act on. Include specific metric values and trends: `"TDS rising 42→83 ppm over 60s"` not `"anomaly detected"`. |
 | **Confidence calibration** | Calibrate confidence to reflect actual decision quality. Avoid always returning 0.99 — it reduces audit value. |
-| **Avoid repeat commands** | If the same command has been suggested in consecutive cycles without state change, reconsider whether the action was appropriate or whether the AI is stuck in a loop. |
+| **Stability** | For a given context input, the decision should be stable across calls. Stochastic outputs are harder to audit in industrial settings. |
 
 ---
 
@@ -401,36 +444,33 @@ Content-Type: application/json
 {
   "request_id":         "a1b2c3d4-0000-4000-8000-112233445566",
   "device_id":          "ESP32_ECBA88C92DF4",
-  "timestamp":          "2026-05-20T14:32:07.441Z",
+  "timestamp":          "2026-05-27T15:32:07Z",
   "fsm_state":          "PRODUCING",
   "connectivity":       "ONLINE",
-  "risk_level":         "MEDIUM",
-  "health_status":      "WARNING",
-  "health_message":     "Efficiency declining over last 2 hours",
   "seconds_since_seen": 2,
-  "metrics": {
-    "flow_perm_lpm":     2.1,
-    "flow_rechazo_lpm":  3.9,
-    "pressure_in_bar":   7.4,
-    "pressure_out_bar":  0.3,
-    "pressure_membrane": 7.1,
-    "volume_perm_l":     24890.0,
-    "volume_rechazo_l":  10200.0,
-    "tds_in_ppm":        285.0,
-    "tds_out_ppm":       10.9,
-    "recovery":          0.35,
-    "efficiency":        0.963,
-    "risk_score":        48.0,
-    "liters_today":      890.0,
-    "waste_pct":         65.0
-  },
-  "active_alerts": [
-    {
-      "code":     "LOW_EFFICIENCY",
-      "message":  "Efficiency below warning threshold (0.963 vs 0.970)",
-      "severity": "WARNING"
-    }
-  ]
+  "telemetry_window": {
+    "window_seconds":        60,
+    "sample_period_seconds": 1,
+    "samples": [
+      {
+        "ts":                    "2026-05-27T15:31:08Z",
+        "flow_perm_lpm":         2.1,
+        "flow_rechazo_lpm":      3.9,
+        "pressure_in_bar":       7.4,
+        "pressure_out_bar":      0.3,
+        "pressure_membrane_bar": 7.1,
+        "volume_perm_l":         24890.0,
+        "volume_rechazo_l":      10200.0,
+        "tds_in_voltage":        1.80,
+        "tds_out_voltage":       0.21,
+        "tds_in_ppm":            285.0,
+        "tds_out_ppm":           10.9,
+        "recovery":              0.3500,
+        "efficiency":            0.9617,
+        "waste_pct":             65.0
+      }
+    ]
+  }
 }
 ```
 
@@ -443,7 +483,7 @@ Content-Type: application/json
 {
   "decision":      "NONE",
   "confidence":    0.78,
-  "reason":        "Efficiency marginally below threshold but trend is stable — monitoring",
+  "reason":        "Flow and TDS stable across all samples — no action required",
   "suggested_cmd": null
 }
 ```
@@ -457,7 +497,7 @@ Content-Type: application/json
 {
   "decision":      "EXECUTE",
   "confidence":    0.85,
-  "reason":        "Output TDS at 0.06 exceeds 0.05 threshold with declining efficiency — flush recommended",
+  "reason":        "TDS output trending up 10.9→62.3 ppm over 60 samples with stable inlet — flush recommended",
   "suggested_cmd": "FLUSH"
 }
 ```
@@ -479,23 +519,17 @@ Content-Type: application/json
 
 ## 13. Future extensions (informational)
 
-The current integration is intentionally minimal. The following extensions are under consideration for future versions:
-
 | Extension | Description |
 |-----------|-------------|
 | **Extended command set** | Additional commands may be added (e.g., `CALIBRATE`, `SERVICE_MODE`). All new commands will appear in the whitelist documentation before deployment. |
-| **Temporal history window** | A rolling window of recent telemetry samples (e.g., last 10 minutes) may be included in the context payload for trend analysis. |
-| **Fault prediction** | Pre-fault detection based on gradual sensor degradation patterns before the system enters `FAULT`. |
-| **Predictive maintenance** | Estimating membrane replacement intervals based on efficiency degradation curves. |
-| **Multi-device fleet context** | Aggregate metrics across a client's fleet to detect systemic issues. |
+| **Longer history windows** | Window depth is configurable via `AI_WINDOW_SECONDS`. Deeper windows (10–60 minutes) may be enabled per device for degradation trend analysis. |
 | **Per-device model adaptation** | Device-specific baseline learning to personalize thresholds per installation. |
 | **AI feedback loop** | Optional structured feedback from KAIROX to the AI API indicating whether suggested commands were executed and what the outcome was. |
+| **Multi-device fleet context** | Aggregate metrics across a client's fleet to detect systemic issues. |
 
 ---
 
 ## Appendix: Validation rules reference
-
-This table summarizes all checks the backend applies to an AI response before it is considered valid:
 
 | Rule | Check | Rejection message example |
 |------|-------|--------------------------|
@@ -509,4 +543,4 @@ This table summarizes all checks the backend applies to an AI response before it
 
 ---
 
-*This document describes the KAIROX AI integration protocol as of backend version 3.4. For questions or clarifications, contact the KAIROX integration team.*
+*This document describes the KAIROX AI integration protocol as of backend version 3.4+. For questions or clarifications, contact the KAIROX integration team.*

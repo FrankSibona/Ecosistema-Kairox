@@ -2,7 +2,7 @@
 ai_client.py — KAIROX external AI integration client
 
 Responsibilities:
-  - Build context payload from current DB state (with request_id for tracing)
+  - Build context payload from current DB state + rolling telemetry window
   - POST context to external AI API with configurable timeout
   - Validate AI response strictly (no unexpected fields allowed)
   - Normalize suggested_cmd to uppercase before validation
@@ -13,6 +13,11 @@ Does NOT:
   - Write to the database
   - Hold global mutable state
 
+Payload design:
+  KAIROX sends raw telemetry — no backend-inferred diagnostics.
+  The AI receives: connectivity state, FSM state, and a rolling window of raw
+  sensor samples. Inference (risk, health, anomaly detection) is the AI's job.
+
 Naming convention: "suggested_cmd" is used consistently everywhere —
 in the response JSON, logs, and DB inserts.
 """
@@ -22,7 +27,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -45,51 +50,167 @@ _FSM_ALLOWED_STATES: dict = {
 }
 
 
+# ── Telemetry window builder ────────────────────────────────────────────────────
+
+def _build_telemetry_window(
+    device_id: str,
+    db: Any,
+    window_seconds: int,
+    sample_period_sec: int,
+    max_samples: int,
+) -> dict:
+    """
+    Query raw telemetry tables and return a time-windowed sample list.
+
+    Strategy:
+      - Fetch process + quality rows for last window_seconds (time-bounded SQL)
+      - Index quality rows by integer second for O(1) nearest-match lookup
+      - Apply sample_period_sec filter in Python (skip rows too close to last kept)
+      - Hard cap at max_samples
+    """
+    # DB fetch limit: enough rows to cover the window before Python sampling
+    db_limit = min(max_samples * max(1, sample_period_sec) + 20, 10_000)
+
+    proc_rows = db.fetchall(
+        """
+        SELECT time, flow_perm_lpm, flow_rechazo_lpm,
+               pressure_membrane_bar, pressure_brine_bar,
+               volume_perm_l, volume_rechazo_l
+        FROM telemetry_process
+        WHERE device_id = %s
+          AND time > NOW() - MAKE_INTERVAL(secs => %s)
+        ORDER BY time ASC
+        LIMIT %s
+        """,
+        (device_id, window_seconds, db_limit),
+    )
+
+    qual_rows = db.fetchall(
+        """
+        SELECT time, tds_in_voltage, tds_out_voltage, tds_in_ppm, tds_out_ppm
+        FROM telemetry_quality
+        WHERE device_id = %s
+          AND time > NOW() - MAKE_INTERVAL(secs => %s)
+        ORDER BY time ASC
+        LIMIT %s
+        """,
+        (device_id, window_seconds, db_limit),
+    )
+
+    # Index quality rows by integer second (UNIX epoch) for fast nearest lookup
+    qual_index: Dict[int, tuple] = {}
+    for r in qual_rows:
+        qt = r[0]
+        if qt.tzinfo is None:
+            qt = qt.replace(tzinfo=timezone.utc)
+        qual_index[int(qt.timestamp())] = r
+
+    samples: List[dict] = []
+    last_ts: Optional[datetime] = None
+
+    for r in proc_rows:
+        ts = r[0]
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        # Sample period filter
+        if last_ts is not None:
+            if (ts - last_ts).total_seconds() < sample_period_sec:
+                continue
+
+        # Nearest quality row (search ±3s around this timestamp)
+        ts_sec = int(ts.timestamp())
+        qual = None
+        for delta in (0, -1, 1, -2, 2, -3, 3):
+            qual = qual_index.get(ts_sec + delta)
+            if qual:
+                break
+
+        # DB field mapping:
+        #   pressure_membrane_bar → inlet pressure (feed side of membrane)
+        #   pressure_brine_bar    → brine/concentrate pressure
+        #   pressure_membrane_bar (in output) → differential = in - brine
+        p_in    = r[3]  # inlet (DB column named pressure_membrane_bar)
+        p_brine = r[4]
+        p_diff  = (round(p_in - p_brine, 3)
+                   if p_in is not None and p_brine is not None else None)
+
+        flow_p = r[1]
+        flow_r = r[2]
+        total_flow = (flow_p or 0.0) + (flow_r or 0.0)
+
+        recovery   = None
+        waste_pct  = None
+        efficiency = None
+
+        if flow_p is not None and flow_r is not None and total_flow > 0:
+            recovery  = round(flow_p / total_flow, 4)
+            waste_pct = round((flow_r / total_flow) * 100, 2)
+
+        tds_in_v = tds_out_v = tds_in_ppm = tds_out_ppm = None
+        if qual:
+            tds_in_v   = qual[1]
+            tds_out_v  = qual[2]
+            tds_in_ppm = qual[3]
+            tds_out_ppm = qual[4]
+
+        if tds_in_ppm and tds_in_ppm > 0 and tds_out_ppm is not None:
+            efficiency = round(1.0 - (tds_out_ppm / tds_in_ppm), 4)
+
+        samples.append({
+            "ts":                    ts.isoformat(),
+            "flow_perm_lpm":         flow_p,
+            "flow_rechazo_lpm":      flow_r,
+            "pressure_in_bar":       p_in,
+            "pressure_out_bar":      p_brine,
+            "pressure_membrane_bar": p_diff,
+            "volume_perm_l":         r[5],
+            "volume_rechazo_l":      r[6],
+            "tds_in_voltage":        tds_in_v,
+            "tds_out_voltage":       tds_out_v,
+            "tds_in_ppm":            tds_in_ppm,
+            "tds_out_ppm":           tds_out_ppm,
+            "recovery":              recovery,
+            "efficiency":            efficiency,
+            "waste_pct":             waste_pct,
+        })
+        last_ts = ts
+
+        if len(samples) >= max_samples:
+            break
+
+    return {
+        "window_seconds":        window_seconds,
+        "sample_period_seconds": sample_period_sec,
+        "samples":               samples,
+    }
+
+
 # ── Context builder ────────────────────────────────────────────────────────────
 
-def build_context(device_id: str, db: Any) -> dict:
+def build_context(
+    device_id: str,
+    db: Any,
+    window_seconds: int = 60,
+    sample_period_sec: int = 1,
+    max_samples: int = 120,
+) -> dict:
     """
-    Assemble the context payload from current DB state.
+    Assemble the context payload from current DB state + telemetry window.
 
     Includes a request_id UUID for end-to-end traceability across
     logs, DB records, and MQTT audit trails.
 
     Returns a plain dict. No DB writes, no side effects.
+
+    The payload contains raw telemetry only — no backend-inferred diagnostics.
+    All inference is the AI's responsibility.
     """
     now_utc    = datetime.now(timezone.utc)
     request_id = str(uuid.uuid4())
 
     st = db.fetchall(
-        """SELECT state, online, last_seen,
-                  biz_risk_level, biz_risk_score,
-                  health_status, health_message,
-                  flow_perm_lpm, pressure_membrane, recovery, efficiency,
-                  biz_liters_today, biz_waste_pct
-           FROM device_status WHERE device_id = %s""",
-        (device_id,),
-    )
-
-    proc = db.fetchall(
-        """SELECT flow_perm_lpm, flow_rechazo_lpm,
-                  pressure_membrane_bar, pressure_brine_bar,
-                  volume_perm_l, volume_rechazo_l
-           FROM telemetry_process WHERE device_id = %s
-           ORDER BY time DESC LIMIT 1""",
-        (device_id,),
-    )
-
-    qual = db.fetchall(
-        """SELECT tds_in_ppm, tds_out_ppm
-           FROM telemetry_quality WHERE device_id = %s
-           ORDER BY time DESC LIMIT 1""",
-        (device_id,),
-    )
-
-    alerts = db.fetchall(
-        """SELECT code, message, severity
-           FROM diagnostics WHERE device_id = %s
-             AND time > NOW() - INTERVAL '1 hour'
-           ORDER BY time DESC LIMIT 5""",
+        "SELECT state, online, last_seen FROM device_status WHERE device_id = %s",
         (device_id,),
     )
 
@@ -99,58 +220,34 @@ def build_context(device_id: str, db: Any) -> dict:
         "timestamp":          now_utc.isoformat(),
         "fsm_state":          "UNKNOWN",
         "connectivity":       "UNKNOWN",
-        "risk_level":         "UNKNOWN",
-        "health_status":      "UNKNOWN",
-        "health_message":     None,
         "seconds_since_seen": None,
-        "metrics":            {},
-        "active_alerts":      [],
+        "telemetry_window":   {"window_seconds": window_seconds,
+                               "sample_period_seconds": sample_period_sec,
+                               "samples": []},
     }
 
     if st:
         s        = st[0]
-        secs_ago = int((now_utc - s[2]).total_seconds()) if s[2] else None
+        last_seen = s[2]
+        secs_ago  = None
+        if last_seen is not None:
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            secs_ago = int((now_utc - last_seen).total_seconds())
+
         ctx.update({
             "fsm_state":          s[0] or "UNKNOWN",
             "connectivity":       (
                 "ONLINE"
-                if s[1] and secs_ago is not None and secs_ago < 90
+                if secs_ago is not None and secs_ago < 90
                 else "OFFLINE"
             ),
-            "risk_level":         s[3] or "UNKNOWN",
-            "health_status":      s[5] or "UNKNOWN",
-            "health_message":     s[6],
             "seconds_since_seen": secs_ago,
         })
-        ctx["metrics"].update({
-            "risk_score":        s[4],
-            "flow_perm_lpm":     s[7],
-            "pressure_membrane": s[8],
-            "recovery":          s[9],
-            "efficiency":        s[10],
-            "liters_today":      s[11],
-            "waste_pct":         s[12],
-        })
 
-    if proc:
-        p = proc[0]
-        ctx["metrics"].update({
-            "flow_perm_lpm":    p[0],
-            "flow_rechazo_lpm": p[1],
-            "pressure_in_bar":  p[2],
-            "pressure_out_bar": p[3],
-            "volume_perm_l":    p[4],
-            "volume_rechazo_l": p[5],
-        })
-
-    if qual:
-        ctx["metrics"]["tds_in_ppm"]  = qual[0][0]
-        ctx["metrics"]["tds_out_ppm"] = qual[0][1]
-
-    ctx["active_alerts"] = [
-        {"code": r[0], "message": r[1], "severity": r[2]}
-        for r in alerts
-    ]
+    ctx["telemetry_window"] = _build_telemetry_window(
+        device_id, db, window_seconds, sample_period_sec, max_samples
+    )
 
     return ctx
 

@@ -40,7 +40,7 @@ IMPACTO FUNCIONAL:
         vs
         interpretación (análisis)
 
-NO_FLOW_DETECTED (mejora implícita)
+NO_PERMEATE_FLOW (mejora implícita)
   → Sigue operando correctamente usando datos físicos directos
   → Detecta flujo nulo incluso fuera de métricas calculadas
 
@@ -50,7 +50,7 @@ ARQUITECTURA DE CAPAS (actualizada):
            → sensores, señales crudas, realidad del proceso
 
   Capa 1 → Eventos (instantáneos)
-           → alertas inmediatas (ej: NO_FLOW_DETECTED)
+           → alertas inmediatas (ej: NO_PERMEATE_FLOW)
 
   Capa 2 → Diagnóstico (con histéresis)
            → problemas confirmados en el tiempo
@@ -105,10 +105,17 @@ import functools
 import hmac
 import json
 import logging
+import math
 import os
+import queue
+import smtplib
 import threading
 import time
 import uuid
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+import alert_config as acfg
 from collections import deque, defaultdict
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional, Dict, List, Any
@@ -154,6 +161,14 @@ MQTT_TOPIC  = "fyntek/#"
 TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_ADMIN_CHAT = os.getenv("TELEGRAM_ADMIN_CHAT", "")
 
+# ── Email (SMTP) ──────────────────────────────────────────────────────────────
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "")
+SMTP_TO   = os.getenv("SMTP_TO",   "")   # comma-separated global alert recipients
+
 # ── Command Engine ────────────────────────────────────────────────────────────
 COMMAND_ALLOWED         = {"START", "STOP", "FLUSH", "RST"}
 COMMAND_TIMEOUT_SEC     = int(os.getenv("COMMAND_TIMEOUT_SEC", "60"))
@@ -183,9 +198,13 @@ API_VERSION             = "1"
 # This engine proactively calls an external AI API for each device where
 # ai_mode != 'OFF'. Empty AI_ENDPOINT_URL disables the engine entirely.
 AI_ENDPOINT_URL      = os.getenv("AI_ENDPOINT_URL", "")
-AI_POLL_INTERVAL_SEC = max(10,  int(os.getenv("AI_POLL_INTERVAL_SEC", "60")))   # min 10s
-AI_TIMEOUT_SEC       = max(1,   int(os.getenv("AI_TIMEOUT_SEC", "10")))         # min 1s
-AI_AUTO_COOLDOWN_SEC = max(0,   int(os.getenv("AI_AUTO_COOLDOWN_SEC", "300")))  # 0 = no cooldown
+AI_POLL_INTERVAL_SEC = max(10,  int(os.getenv("AI_POLL_INTERVAL_SEC",  "60")))   # min 10s
+AI_TIMEOUT_SEC       = max(1,   int(os.getenv("AI_TIMEOUT_SEC",        "10")))   # min 1s
+AI_AUTO_COOLDOWN_SEC = max(0,   int(os.getenv("AI_AUTO_COOLDOWN_SEC",  "300")))  # 0 = no cooldown
+# Telemetry window sent to AI on each poll cycle
+AI_WINDOW_SECONDS    = max(10,  int(os.getenv("AI_WINDOW_SECONDS",     "60")))   # window depth
+AI_SAMPLE_PERIOD_SEC = max(1,   int(os.getenv("AI_SAMPLE_PERIOD_SEC",  "1")))    # seconds between samples
+AI_WINDOW_MAX_SAMPLES= max(1,   int(os.getenv("AI_WINDOW_MAX_SAMPLES", "120")))  # hard cap on samples
 
 # ── Admin Panel ───────────────────────────────────────────────────────────────
 # HTTP Basic Auth for /admin/* routes.
@@ -207,26 +226,31 @@ AI_GATE_MODES        = {"OBSERVE_ONLY", "AUTO_EXECUTE", "LOCKDOWN"}
 AI_GATE_DEFAULT_MODE = os.getenv("AI_GATE_DEFAULT_MODE", "OBSERVE_ONLY")
 
 THRESHOLDS = {
-    "pressure_max_bar":           float(os.getenv("THRESH_PRESSURE_MAX",   "9.0")),
-    "pressure_low_bar":           float(os.getenv("THRESH_PRESSURE_LOW",   "2.0")),
-    "efficiency_warning":         float(os.getenv("THRESH_EFF_WARNING",    "0.85")),
+    # Alert thresholds — authoritative values come from alert_config (single source of truth)
+    "pressure_max_bar":           acfg.THRESH_HIGH_PRESSURE,
+    "pressure_low_bar":           acfg.THRESH_LOW_PRESSURE,
+    "efficiency_warning":         acfg.THRESH_LOW_EFFICIENCY,
     "efficiency_critical":        float(os.getenv("THRESH_EFF_CRITICAL",   "0.70")),
     "recovery_min":               float(os.getenv("THRESH_RECOVERY_MIN",   "0.25")),
     "recovery_max":               float(os.getenv("THRESH_RECOVERY_MAX",   "0.85")),
-    "flow_perm_min_lpm":          float(os.getenv("THRESH_FLOW_MIN",       "0.3")),
+    "flow_perm_min_lpm":          acfg.THRESH_MIN_FLOW,
     "alert_cooldown_sec":         int(os.getenv("ALERT_COOLDOWN",          "300")),
     "trend_window":               int(os.getenv("TREND_WINDOW",            "30")),
     "pressure_trend_threshold":   float(os.getenv("TREND_PRESSURE",        "0.02")),
     "efficiency_trend_threshold": float(os.getenv("TREND_EFFICIENCY",      "-0.005")),
     "hysteresis_confirm_sec":     int(os.getenv("HYSTERESIS_CONFIRM",      "60")),
     "hysteresis_clear_sec":       int(os.getenv("HYSTERESIS_CLEAR",        "120")),
-    "no_flow_timeout_sec":        int(os.getenv("NO_FLOW_TIMEOUT",         "30")),
-    # Cada cuántos segundos se recalculan métricas de negocio por dispositivo
+    "no_flow_timeout_sec":        acfg.THRESH_NO_FLOW_SEC,
+    # Business metrics refresh
     "biz_refresh_sec":            int(os.getenv("BIZ_REFRESH",             "300")),
-    # Ventana de días para calcular tendencia de degradación
     "degradation_window_days":    int(os.getenv("DEGRADATION_DAYS",        "7")),
-    # Mínima pérdida de eficiencia para reportar degradación (%)
     "degradation_min_pct":        float(os.getenv("DEGRADATION_MIN_PCT",   "3.0")),
+    # Alert system (reference alert_config)
+    "tds_out_warn_ppm":           acfg.THRESH_TDS_OUT_WARN,
+    "tds_out_resolve_ppm":        acfg.THRESH_TDS_OUT_RESOLVE,
+    "recovery_resolve_pct":       float(os.getenv("THRESH_RECOVERY_RESOLVE", "0.28")),
+    "alert_reminder_sec":         acfg.THRESH_REMINDER_SEC,
+    "offline_check_interval_sec": acfg.THRESH_OFFLINE_CHECK_SEC,
 }
 
 BASELINE_FIELDS = [
@@ -241,13 +265,15 @@ DIAG_SCORES = {
     "FAULT_SYSTEM":        100,
     "NO_RAW_WATER":         90,
     "HIGH_PRESSURE":        90,
-    "NO_FLOW_DETECTED":     88,
+    "NO_PERMEATE_FLOW":     88,
     "CRITICAL_EFFICIENCY":  80,
     "MEMBRANE_DEGRADED":    75,
     "MEMBRANE_FOULING":     70,
     "MEMBRANE_SCALING":     65,
     "PROGRESSIVE_FOULING":  60,
     "LOW_RECOVERY":         45,
+    "HIGH_TDS_OUTPUT":      55,
+    "SENSOR_INVALID":       50,
     "LOW_EFFICIENCY":       40,
     "LOW_PERMEATE_FLOW":    35,
     "LOW_PRESSURE":         35,
@@ -257,7 +283,7 @@ DIAG_SCORES = {
 IMMEDIATE_ALERT_CODES = {
     "FAULT_NO_WATER", "FAULT_SYSTEM",
     "NO_RAW_WATER", "HIGH_PRESSURE",
-    "CRITICAL_EFFICIENCY", "NO_FLOW_DETECTED",
+    "CRITICAL_EFFICIENCY", "NO_PERMEATE_FLOW",
 }
 
 ACTIVE_STATES  = {"PRODUCING", "STARTING"}
@@ -269,7 +295,7 @@ RISK_WEIGHTS = {
     "FAULT_NO_WATER":       95,
     "NO_RAW_WATER":         90,
     "HIGH_PRESSURE":        85,
-    "NO_FLOW_DETECTED":     80,
+    "NO_PERMEATE_FLOW":     80,
     "CRITICAL_EFFICIENCY":  75,
     "MEMBRANE_DEGRADED":    60,
     "MEMBRANE_FOULING":     55,
@@ -987,20 +1013,26 @@ no_flow_tracker = NoFlowTracker()
 # ============================================================
 
 class HysteresisManager:
+    """
+    Per-code time-based hysteresis for slow diagnostic conditions.
+
+    trigger_seconds: how long a condition must persist before it is "confirmed"
+    clear_seconds:   how long a condition must be absent before it is cleared
+
+    Both values come from alert_config.get_rule(code) — configurable per alert code.
+    """
+
     def __init__(self):
         self._state: Dict[str, Dict[str, Dict]] = defaultdict(dict)
 
-    def update(
-        self,
-        device_id:    str,
-        active_codes: List[str],
-        confirm_sec:  int = 60,
-        clear_sec:    int = 120,
-    ) -> List[str]:
+    def update(self, device_id: str, active_codes: List[str]) -> List[str]:
         now   = time.time()
         state = self._state[device_id]
 
         for code in active_codes:
+            rule = acfg.get_rule(code)
+            trigger = rule["trigger_seconds"]
+
             if code not in state:
                 state[code] = {
                     "first_seen": now, "last_seen": now,
@@ -1011,18 +1043,19 @@ class HysteresisManager:
                 state[code]["cleared_since"] = None
 
             if not state[code]["confirmed"]:
-                if now - state[code]["first_seen"] >= confirm_sec:
+                if now - state[code]["first_seen"] >= trigger:
                     state[code]["confirmed"] = True
-                    log.info(f"[{device_id}] Diagnóstico confirmado: {code}")
+                    log.info(f"[{device_id}] Diagnóstico confirmado: {code} (trigger={trigger}s)")
 
         to_delete = []
         for code, info in state.items():
             if code not in active_codes:
+                clear = acfg.get_rule(code)["clear_seconds"]
                 if info["cleared_since"] is None:
                     info["cleared_since"] = now
-                elif now - info["cleared_since"] >= clear_sec:
+                elif now - info["cleared_since"] >= clear:
                     to_delete.append(code)
-                    log.info(f"[{device_id}] Diagnóstico limpiado: {code}")
+                    log.info(f"[{device_id}] Diagnóstico limpiado: {code} (clear={clear}s)")
         for code in to_delete:
             del state[code]
 
@@ -1032,7 +1065,8 @@ class HysteresisManager:
         info = self._state[device_id].get(code)
         if not info or not info["confirmed"]:
             return False
-        return (time.time() - info["first_seen"]) < THRESHOLDS["hysteresis_confirm_sec"] + 5
+        trigger = acfg.get_rule(code)["trigger_seconds"]
+        return (time.time() - info["first_seen"]) < trigger + 5
 
 
 hysteresis = HysteresisManager()
@@ -1050,6 +1084,9 @@ class DiagnosticEngine:
         all_diags.extend(self._eval_events(state, inputs, process, device_id))
         if metrics:
             all_diags.extend(self._eval_operational(metrics, process, thresh))
+        sensor_diag = self._check_sensor_invalid(process, metrics)
+        if sensor_diag:
+            all_diags.append(sensor_diag)
 
         trend_diags = []
         if metrics and trends:
@@ -1111,7 +1148,7 @@ class DiagnosticEngine:
             duration = no_flow_tracker.get_duration(device_id)
             p_mem    = validate_float(process.get("pressure_membrane_bar"), 0, 50)
             results.append(DiagnosticResult(
-                "CRITICAL", "NO_FLOW_DETECTED",
+                "CRITICAL", "NO_PERMEATE_FLOW",
                 f"Equipo en producción sin caudal de permeado por {duration:.0f}s.",
                 "Verificar bomba de alta presión, válvula de permeado y membrana. "
                 "Revisar si hay aire atrapado en el sistema.",
@@ -1122,7 +1159,7 @@ class DiagnosticEngine:
                     "pressure_membrane": p_mem,
                     "confidence_note":  "Verificar sensor de caudal antes de actuar",
                 },
-                score=DIAG_SCORES["NO_FLOW_DETECTED"], is_event=True,
+                score=DIAG_SCORES["NO_PERMEATE_FLOW"], is_event=True,
             ))
 
         return results
@@ -1221,7 +1258,50 @@ class DiagnosticEngine:
                 score=DIAG_SCORES["LOW_PRESSURE"],
             ))
 
+        tds_out = metrics.get("tds_out_ppm")
+        thr_tds = THRESHOLDS["tds_out_warn_ppm"]
+        if tds_out is not None and tds_out > thr_tds:
+            results.append(DiagnosticResult(
+                "WARNING", "HIGH_TDS_OUTPUT",
+                f"TDS salida elevado: {tds_out:.0f} ppm (umbral {thr_tds:.0f} ppm).",
+                "Verificar integridad de la membrana. Posible rotura o bypass.",
+                {"tds_out_ppm": tds_out, "threshold_ppm": thr_tds},
+                score=DIAG_SCORES["HIGH_TDS_OUTPUT"],
+            ))
+
         return results
+
+    def _check_sensor_invalid(self, process: Dict, metrics: Optional[Dict]) -> Optional["DiagnosticResult"]:
+        """Detect NaN/Inf or physically impossible sensor readings."""
+        bad = []
+        checks = {
+            "pressure_membrane_bar": process.get("pressure_membrane_bar"),
+            "pressure_brine_bar":    process.get("pressure_brine_bar"),
+            "flow_perm_lpm":         process.get("flow_perm_lpm"),
+            "flow_rechazo_lpm":      process.get("flow_rechazo_lpm"),
+        }
+        if metrics:
+            checks["tds_in_ppm"]  = metrics.get("tds_in_ppm")
+            checks["tds_out_ppm"] = metrics.get("tds_out_ppm")
+
+        for key, val in checks.items():
+            if val is None:
+                continue
+            lo, hi = acfg.SENSOR_LIMITS.get(key, (-1e9, 1e9))
+            if math.isnan(val) or math.isinf(val):
+                bad.append(f"{key}=NaN/Inf")
+            elif val < lo or val > hi:
+                bad.append(f"{key}={val:.2g} fuera de rango [{lo},{hi}]")
+
+        if not bad:
+            return None
+        return DiagnosticResult(
+            "WARNING", "SENSOR_INVALID",
+            f"Lectura de sensor inválida: {', '.join(bad[:3])}.",
+            "Verificar calibración y conexión de sensores.",
+            {"invalid": bad},
+            score=50,
+        )
 
     def _eval_trends(self, metrics, trends) -> List[Dict]:
         trend_list = []
@@ -1278,106 +1358,384 @@ class DeviceStateTracker:
 tracker = DeviceStateTracker()
 
 # ============================================================
+# TELEGRAM WORKER
+# ============================================================
+
+class TelegramWorker:
+    """Async Telegram sender — HTTP calls never run on the MQTT thread."""
+
+    def __init__(self, maxsize: int = 50):
+        self._q: queue.Queue = queue.Queue(maxsize=maxsize)
+
+    def start(self):
+        t = threading.Thread(target=self._loop, daemon=True, name="telegram-worker")
+        t.start()
+        log.info("✅ TelegramWorker iniciado")
+
+    def send(self, token: str, chat_id: str, text: str, device_id: str, code: str):
+        try:
+            self._q.put_nowait({"token": token, "chat_id": chat_id, "text": text,
+                                "device_id": device_id, "code": code})
+        except queue.Full:
+            log.warning(f"[ALERT] TELEGRAM QUEUE FULL — descartando {device_id} {code}")
+
+    def _loop(self):
+        while True:
+            item = self._q.get()
+            try:
+                resp = requests.post(
+                    f"https://api.telegram.org/bot{item['token']}/sendMessage",
+                    json={"chat_id": item["chat_id"], "text": item["text"]},
+                    timeout=10,
+                )
+                if resp.ok:
+                    log.info(f"[ALERT] TELEGRAM SENT — {item['device_id']} {item['code']}")
+                else:
+                    log.error(
+                        f"[ALERT] TELEGRAM FAILED — {item['device_id']} {item['code']} "
+                        f"HTTP {resp.status_code}: {resp.text[:80]}"
+                    )
+            except Exception as e:
+                log.error(f"[ALERT] TELEGRAM FAILED — {item['device_id']} {item['code']} {e}")
+            finally:
+                self._q.task_done()
+
+
+telegram_worker = TelegramWorker()
+
+
+# ============================================================
+# EMAIL WORKER
+# ============================================================
+
+class EmailWorker:
+    """Async SMTP sender — runs on a dedicated daemon thread."""
+
+    def __init__(self, maxsize: int = 50):
+        self._q: queue.Queue = queue.Queue(maxsize=maxsize)
+
+    def start(self):
+        t = threading.Thread(target=self._loop, daemon=True, name="email-worker")
+        t.start()
+        log.info("✅ EmailWorker iniciado")
+
+    def send(self, to_addrs: List[str], subject: str, body: str,
+             device_id: str, code: str):
+        try:
+            self._q.put_nowait({
+                "to": to_addrs, "subject": subject, "body": body,
+                "device_id": device_id, "code": code,
+            })
+        except queue.Full:
+            log.warning(f"[ALERT] EMAIL QUEUE FULL — descartando {device_id} {code}")
+
+    def _loop(self):
+        while True:
+            item = self._q.get()
+            try:
+                self._send(item)
+            except Exception as e:
+                log.error(f"[ALERT] EMAIL FAILED — {item['device_id']} {item['code']} {e}")
+            finally:
+                self._q.task_done()
+
+    def _send(self, item: dict):
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = item["subject"]
+        msg["From"]    = SMTP_FROM or SMTP_USER
+        msg["To"]      = ", ".join(item["to"])
+        msg.attach(MIMEText(item["body"], "plain", "utf-8"))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as s:
+            s.ehlo()
+            s.starttls()
+            if SMTP_USER and SMTP_PASS:
+                s.login(SMTP_USER, SMTP_PASS)
+            s.sendmail(msg["From"], item["to"], msg.as_string())
+
+        log.info(f"[ALERT] EMAIL SENT — {item['device_id']} {item['code']} → {item['to']}")
+
+
+email_worker = EmailWorker()
+
+
+# ============================================================
+# NOTIFIER
+# ============================================================
+
+class Notifier:
+    """
+    Channel-agnostic notification dispatcher.
+
+    AlertManager calls notifier.send() without knowing Telegram or SMTP details.
+    Supported channels: Telegram (per-device chat_id or global admin), Email (global SMTP_TO).
+    """
+
+    def __init__(self):
+        self._chat_cache: Dict[str, Optional[str]] = {}
+        self._name_cache: Dict[str, str] = {}
+
+    def get_name(self, device_id: str) -> str:
+        if device_id not in self._name_cache:
+            rows = db.fetchall(
+                "SELECT display_name FROM devices WHERE device_id = %s", (device_id,)
+            )
+            self._name_cache[device_id] = (rows[0][0] or device_id) if rows else device_id
+        return self._name_cache[device_id]
+
+    def _get_chat(self, device_id: str) -> Optional[str]:
+        if device_id not in self._chat_cache:
+            rows = db.fetchall(
+                "SELECT telegram_chat_id FROM devices WHERE device_id = %s", (device_id,)
+            )
+            self._chat_cache[device_id] = (
+                rows[0][0] if rows and rows[0][0] else TELEGRAM_ADMIN_CHAT
+            )
+        return self._chat_cache[device_id]
+
+    def invalidate(self, device_id: str):
+        self._chat_cache.pop(device_id, None)
+        self._name_cache.pop(device_id, None)
+
+    def send(self, device_id: str, code: str, severity: str, message: str):
+        icon = {"CRITICAL": "🔴", "WARNING": "⚠", "INFO": "ℹ"}.get(severity, "•")
+        name = self.get_name(device_id)
+        body = f"{icon} {name}\n{code}\n\n{message}"
+
+        # Telegram
+        token   = TELEGRAM_TOKEN
+        chat_id = self._get_chat(device_id)
+        if token and chat_id:
+            telegram_worker.send(token, chat_id, body, device_id, code)
+        else:
+            log.debug(f"[ALERT] Telegram no configurado para {device_id}")
+
+        # Email
+        if SMTP_HOST and SMTP_TO:
+            recipients = [a.strip() for a in SMTP_TO.split(",") if a.strip()]
+            if recipients:
+                subject = f"[KAIROX] {code} — {name}"
+                email_worker.send(recipients, subject, body, device_id, code)
+
+
+notifier = Notifier()
+
+
+# ============================================================
 # ALERT MANAGER
 # ============================================================
 
 class AlertManager:
-    def __init__(self):
-        self._last_alert:    Dict[str, float] = {}
-        self._last_code:     Dict[str, str]   = {}
-        self._last_severity: Dict[str, str]   = {}
-        self._chat_cache:    Dict[str, Optional[str]] = {}
+    """
+    Persistent alert system backed by the alerts table.
 
-    def _get_chat(self, device_id: str) -> Optional[str]:
-        if device_id in self._chat_cache:
-            return self._chat_cache[device_id]
-        rows = db.fetchall(
-            "SELECT telegram_chat_id FROM devices WHERE device_id = %s", (device_id,)
-        )
-        chat_id = rows[0][0] if rows and rows[0][0] else TELEGRAM_ADMIN_CHAT
-        self._chat_cache[device_id] = chat_id
-        return chat_id
+    Deduplication: a partial unique index on (device_id, code) WHERE active=TRUE
+    ensures only one active alert per (device_id, code) pair.
+
+    Notification cooldown: immediate on first occurrence, then every
+    THRESHOLDS["alert_reminder_sec"] while the condition persists.
+    In-memory _last_notified survives within a process lifetime; the DB
+    last_notified_at column survives restarts (used for display, not enforcement).
+    """
+
+    # Value-based resolve thresholds: condition(metrics) -> True means alert should clear
+    RESOLVE_HYSTERESIS: Dict[str, Any] = {}  # populated after THRESHOLDS is defined
+
+    def __init__(self):
+        self._last_notified: Dict[str, float] = {}   # key: "device_id:code"
+        self._active_codes:  Dict[str, set]   = defaultdict(set)  # device_id -> {code, ...}
 
     def invalidate_cache(self, device_id: str):
-        self._chat_cache.pop(device_id, None)
+        notifier.invalidate(device_id)
 
-    def process(self, device_id: str, root: DiagnosticResult, is_new: bool, biz: Dict):
-        if root.severity == "OK":
-            self._last_code[device_id]     = "NORMAL"
-            self._last_severity[device_id] = "OK"
-            return
+    # ── Core operations ───────────────────────────────────────────────────────
 
-        now           = time.time()
-        cooldown      = THRESHOLDS["alert_cooldown_sec"]
-        prev_code     = self._last_code.get(device_id, "NORMAL")
-        prev_severity = self._last_severity.get(device_id, "OK")
-
-        should_alert = False
-        reason       = ""
-
-        if root.is_event and (now - self._last_alert.get(device_id, 0)) >= cooldown:
-            should_alert = True
-            reason       = "evento crítico"
-        elif is_new and root.code != prev_code:
-            should_alert = True
-            reason       = "nuevo diagnóstico confirmado"
-        elif (root.severity == "CRITICAL" and prev_severity in ("OK", "WARNING") and
-              (now - self._last_alert.get(device_id, 0)) >= cooldown):
-            should_alert = True
-            reason       = "escalada a CRITICAL"
-
-        if not should_alert:
-            return
-
-        chat_id = self._get_chat(device_id)
-        if not chat_id or not TELEGRAM_TOKEN:
-            log.warning(f"Sin chat_id para {device_id}")
-            return
-
-        icon     = "🚨" if root.severity == "CRITICAL" else "⚠️"
-        conf_pct = int(root.confidence * 100)
-        ev_lines = "\n".join(f"  ✔ {k}: {v}" for k, v in root.evidence.items())
-        sy_lines = ("\n".join(f"  • {k}: {v}" for k, v in root.symptoms.items())
-                    if root.symptoms else "  —")
-
-        # Contexto de negocio en la alerta
-        biz_lines = ""
-        if biz.get("degradation_label"):
-            biz_lines += f"\n📉 {biz['degradation_label']}"
-        if biz.get("waste_pct") is not None:
-            biz_lines += f"\n💧 Desperdicio hoy: {biz['waste_pct']:.1f}%"
-        if biz.get("fulfillment_pct") is not None:
-            biz_lines += f"\n🎯 Cumplimiento: {biz['fulfillment_pct']:.1f}% del objetivo"
-
-        msg = (
-            f"{icon} *FYNTEK [{device_id}]*\n"
-            f"*{root.code}* — Riesgo: {biz.get('risk_level', '?')} "
-            f"(confianza: {conf_pct}%)\n\n"
-            f"📋 {root.message}\n\n"
-            f"🔧 *Acción:* {root.action}\n\n"
-            f"*Evidencias:*\n{ev_lines}\n\n"
-            f"*Síntomas:*\n{sy_lines}"
-            f"{biz_lines}"
+    def fire(self, device_id: str, code: str, severity: str, message: str) -> bool:
+        """
+        Upsert an active alert. Returns True if this created a new alert row.
+        Uses RETURNING (xmax = 0): True = INSERT (new), False = UPDATE (already active).
+        insert_returning() commits the transaction; fetchall() does not.
+        """
+        result = db.insert_returning(
+            """
+            INSERT INTO alerts (device_id, code, severity, message, active)
+            VALUES (%s, %s, %s, %s, TRUE)
+            ON CONFLICT (device_id, code) WHERE active = TRUE
+            DO UPDATE SET
+                severity   = EXCLUDED.severity,
+                message    = EXCLUDED.message,
+                updated_at = NOW()
+            RETURNING (xmax = 0)
+            """,
+            (device_id, code, severity, message)
         )
+        is_new = bool(result)
+        self._active_codes[device_id].add(code)
+        if is_new:
+            log.info(f"[ALERT] NEW — {device_id} {code} [{severity}] {message}")
+        return is_new
 
-        try:
-            resp = requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
-                timeout=5,
+    def resolve(self, device_id: str, code: str):
+        """Mark a single active alert as resolved."""
+        db.execute(
+            "UPDATE alerts SET active=FALSE, resolved_at=NOW(), updated_at=NOW() "
+            "WHERE device_id=%s AND code=%s AND active=TRUE",
+            (device_id, code)
+        )
+        self._active_codes[device_id].discard(code)
+        log.info(f"[ALERT] RESOLVED — {device_id} {code}")
+
+    def resolve_diagnostic_alerts(self, device_id: str):
+        """Resolve all active WARNING/CRITICAL alerts for a device. Skips DEVICE_OFFLINE."""
+        db.execute(
+            "UPDATE alerts SET active=FALSE, resolved_at=NOW(), updated_at=NOW() "
+            "WHERE device_id=%s AND active=TRUE "
+            "AND severity IN ('WARNING','CRITICAL') AND code != 'DEVICE_OFFLINE'",
+            (device_id,)
+        )
+        # Clear in-memory tracking for all non-OFFLINE codes
+        codes = self._active_codes.get(device_id, set())
+        removed = {c for c in codes if c != "DEVICE_OFFLINE"}
+        for c in removed:
+            log.info(f"[ALERT] RESOLVED — {device_id} {c}")
+        self._active_codes[device_id] = codes - removed
+
+    def fire_event(self, device_id: str, code: str, message: str, cooldown_sec: int = 300):
+        """
+        Persist a one-shot INFO event and notify once.
+        INFO alerts are stored inactive (historical log, no persistent active state).
+        """
+        if code not in acfg.ALERT_CODES:
+            return
+        key = f"{device_id}:{code}"
+        now = time.time()
+        if (now - self._last_notified.get(key, 0)) < cooldown_sec:
+            return
+        db.execute(
+            "INSERT INTO alerts (device_id, code, severity, message, active, notification_count) "
+            "VALUES (%s, %s, 'INFO', %s, FALSE, 1)",
+            (device_id, code, message)
+        )
+        notifier.send(device_id, code, "INFO", message)
+        self._last_notified[key] = now
+
+    def check_reconnection(self, device_id: str):
+        """Called on any incoming message. Resolves DEVICE_OFFLINE and fires DEVICE_RECONNECTED."""
+        rows = db.fetchall(
+            "SELECT 1 FROM alerts WHERE device_id=%s AND code='DEVICE_OFFLINE' AND active=TRUE LIMIT 1",
+            (device_id,)
+        )
+        if rows:
+            self.resolve(device_id, "DEVICE_OFFLINE")
+            name = notifier.get_name(device_id)
+            self.fire_event(device_id, "DEVICE_RECONNECTED",
+                            f"{name} reconectado.", cooldown_sec=300)
+            log.info(f"[ALERT] {device_id} reconectado — DEVICE_OFFLINE resuelto")
+
+    def fire_and_notify(self, device_id: str, code: str, severity: str, message: str):
+        """Fire an alert and notify if new or reminder cooldown has elapsed.
+        Only codes in acfg.ALERT_CODES produce persistent alerts and notifications."""
+        if code not in acfg.ALERT_CODES:
+            return
+        key = f"{device_id}:{code}"
+        now = time.time()
+        is_new = self.fire(device_id, code, severity, message)
+        if is_new or (now - self._last_notified.get(key, 0)) >= acfg.THRESH_REMINDER_SEC:
+            notifier.send(device_id, code, severity, message)
+            self._last_notified[key] = now
+            db.execute(
+                "UPDATE alerts SET last_notified_at=NOW(), "
+                "notification_count = notification_count + 1 "
+                "WHERE device_id=%s AND code=%s AND active=TRUE",
+                (device_id, code)
             )
-            if resp.ok:
-                self._last_alert[device_id]    = now
-                self._last_code[device_id]     = root.code
-                self._last_severity[device_id] = root.severity
-                log.info(f"📱 Telegram [{device_id}] {root.code} ({reason})")
-            else:
-                log.error(f"Telegram error {resp.status_code}")
-        except Exception as e:
-            log.error(f"Telegram excepción: {e}")
+
+    # ── Diagnostic pipeline hook ──────────────────────────────────────────────
+
+    def process(self, device_id: str, root: DiagnosticResult, is_new: bool, biz: Dict,
+                metrics: Optional[Dict] = None):
+        """Called from _run_analytics after each diagnostic cycle."""
+        m = metrics or {}
+
+        if root.severity == "OK":
+            self.resolve_diagnostic_alerts(device_id)
+            return
+
+        # Value-based hysteresis: if the alert is already active, check whether
+        # the condition has cleared its resolve threshold before re-firing.
+        active = self._active_codes.get(device_id, set())
+        if root.code in active:
+            resolver = self.RESOLVE_HYSTERESIS.get(root.code)
+            if resolver and resolver(m):
+                self.resolve(device_id, root.code)
+                return  # condition below resolve threshold — don't re-fire
+
+        self.fire_and_notify(device_id, root.code, root.severity, root.message)
 
 
 alert_manager = AlertManager()
+
+# Value-based resolve thresholds — hysteresis band between activate and resolve
+AlertManager.RESOLVE_HYSTERESIS = {
+    "HIGH_TDS_OUTPUT": lambda m: (
+        m.get("tds_out_ppm") is not None
+        and m["tds_out_ppm"] < acfg.THRESH_TDS_OUT_RESOLVE
+    ),
+    "LOW_PRESSURE": lambda m: (
+        m.get("pressure_membrane_bar") is not None
+        and m["pressure_membrane_bar"] > acfg.THRESH_LOW_PRESSURE_RESOLVE
+    ),
+    "HIGH_PRESSURE": lambda m: (
+        m.get("pressure_membrane_bar") is not None
+        and m["pressure_membrane_bar"] < acfg.THRESH_HIGH_PRESSURE_RESOLVE
+    ),
+    "LOW_EFFICIENCY": lambda m: (
+        m.get("efficiency") is not None
+        and m["efficiency"] > acfg.THRESH_LOW_EFFICIENCY_RESOLVE
+    ),
+}
+
+
+# ============================================================
+# OFFLINE CHECKER
+# ============================================================
+
+class OfflineChecker:
+    """Background thread: fires DEVICE_OFFLINE alerts for devices silent > THRESH_OFFLINE_SEC."""
+
+    def start(self):
+        t = threading.Thread(target=self._loop, daemon=True, name="offline-check")
+        t.start()
+        log.info(f"✅ OfflineChecker iniciado (threshold={acfg.THRESH_OFFLINE_SEC}s)")
+
+    def _loop(self):
+        while True:
+            try:
+                self._check()
+            except Exception as e:
+                log.error(f"[OfflineChecker] {e}")
+            time.sleep(acfg.THRESH_OFFLINE_CHECK_SEC)
+
+    def _check(self):
+        now = datetime.now(timezone.utc)
+        rows = db.fetchall(
+            """
+            SELECT d.device_id, COALESCE(d.display_name, d.device_id), ds.last_seen
+            FROM devices d
+            JOIN device_status ds ON d.device_id = ds.device_id
+            WHERE ds.last_seen < NOW() - MAKE_INTERVAL(secs => %s)
+            """,
+            (acfg.THRESH_OFFLINE_SEC,)
+        )
+        for device_id, name, last_seen in rows:
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            secs = int((now - last_seen).total_seconds())
+            msg  = f"{name} sin conexión ({secs}s sin telemetría)."
+            alert_manager.fire_and_notify(device_id, "DEVICE_OFFLINE", "CRITICAL", msg)
+
+
+offline_checker = OfflineChecker()
 
 # ============================================================
 # LEARN ENGINE
@@ -1571,6 +1929,7 @@ class MessageProcessor:
             ),
         )
         tracker.update_process(device_id, data)
+        alert_manager.check_reconnection(device_id)
         self._run_analytics(device_id, timestamp, data)
 
     def _handle_quality(self, device_id, timestamp, data):
@@ -1651,6 +2010,7 @@ class MessageProcessor:
                 "SET last_seen=EXCLUDED.last_seen, online=TRUE",
                 (device_id, timestamp),
             )
+        alert_manager.check_reconnection(device_id)
 
     # ---- ANALYTICS PIPELINE ────────────────────────────────
 
@@ -1687,11 +2047,7 @@ class MessageProcessor:
         # Histéresis
         event_diags    = [d for d in all_diags if d.is_event]
         slow_diags     = [d for d in all_diags if not d.is_event]
-        confirmed_slow = hysteresis.update(
-            device_id, [d.code for d in slow_diags],
-            confirm_sec=THRESHOLDS["hysteresis_confirm_sec"],
-            clear_sec=THRESHOLDS["hysteresis_clear_sec"],
-        )
+        confirmed_slow = hysteresis.update(device_id, [d.code for d in slow_diags])
 
         final_root = DIAG_OK
         is_new     = False
@@ -1857,7 +2213,7 @@ class MessageProcessor:
                 ),
             )
 
-        alert_manager.process(device_id, final_root, is_new, biz)
+        alert_manager.process(device_id, final_root, is_new, biz, metrics)
 
 
 processor = MessageProcessor()
@@ -2115,12 +2471,18 @@ class AIDecisionEngine:
                 log.error(f"[AI-ENGINE] Error processing {device_id}: {e}")
 
     def _process_device(self, device_id: str, ai_mode: str) -> None:
-        ctx    = _ai.build_context(device_id, db)
-        req_id = ctx["request_id"]
+        ctx    = _ai.build_context(
+            device_id, db,
+            window_seconds=AI_WINDOW_SECONDS,
+            sample_period_sec=AI_SAMPLE_PERIOD_SEC,
+            max_samples=AI_WINDOW_MAX_SAMPLES,
+        )
+        req_id   = ctx["request_id"]
+        n_samples = len(ctx.get("telemetry_window", {}).get("samples", []))
 
         log.info(
             f"[AI-ENGINE] req={req_id[:8]}… device={device_id} mode={ai_mode} "
-            f"state={ctx['fsm_state']} risk={ctx['risk_level']}"
+            f"state={ctx['fsm_state']} connectivity={ctx['connectivity']} samples={n_samples}"
         )
 
         decision, error = _ai.get_ai_decision(ctx, AI_ENDPOINT_URL, AI_TIMEOUT_SEC)
@@ -2372,6 +2734,11 @@ def set_config(device_id):
     )
     KPIEngine.invalidate_config(device_id)
     _publish_device_config(device_id, ff1, ff2, tds_t)
+    alert_manager.fire_event(
+        device_id, "CONFIG_UPDATED",
+        f"Config actualizada: ff1={ff1} ff2={ff2} tds_t={tds_t}",
+        cooldown_sec=60,
+    )
     return jsonify({"status": "ok"})
 
 
@@ -2548,12 +2915,33 @@ def get_status(device_id):
     if not rows:
         return jsonify({"error": "device not found"}), 404
     r = rows[0]
+    # Derive online dynamically — the DB flag is never cleared, so it goes stale.
+    # ONLINE = last telemetry or heartbeat arrived within 90 seconds.
+    last_seen_dt = r[9]
+    now_utc = datetime.now(timezone.utc)
+    if last_seen_dt is not None:
+        if last_seen_dt.tzinfo is None:
+            last_seen_dt = last_seen_dt.replace(tzinfo=timezone.utc)
+        seconds_ago = int((now_utc - last_seen_dt).total_seconds())
+        online = seconds_ago < 90
+    else:
+        seconds_ago = None
+        online = False
+    qrow = db.fetchall(
+        "SELECT tds_in_ppm, tds_out_ppm FROM telemetry_quality "
+        "WHERE device_id=%s ORDER BY time DESC LIMIT 1",
+        (device_id,)
+    )
     return jsonify({
         "state": r[0],         "last_severity": r[1],
         "diag_code": r[2],     "diag_message": r[3],   "diag_action": r[4],
         "flow_perm_lpm": r[5], "pressure": r[6],
         "recovery": r[7],      "efficiency": r[8],
-        "last_seen": str(r[9]), "online": r[10],
+        "last_seen": str(last_seen_dt) if last_seen_dt else None,
+        "online": online,
+        "seconds_since_seen": seconds_ago,
+        "tds_in_ppm":  qrow[0][0] if qrow else None,
+        "tds_out_ppm": qrow[0][1] if qrow else None,
         "health": {
             "status": r[11],   "code": r[12],
             "message": r[13],  "action": r[14],
@@ -2568,6 +2956,52 @@ def get_status(device_id):
             "degradation_days": r[24],   "degradation_label": r[25],
         },
     })
+
+@api.route("/api/alerts/<device_id>", methods=["GET"])
+def get_alerts(device_id):
+    active_only = request.args.get("active", "true").lower() in ("true", "1")
+    limit = min(int(request.args.get("limit", "20")), 100)
+    where = "device_id=%s AND active=TRUE" if active_only else "device_id=%s"
+    rows = db.fetchall(
+        f"SELECT id, code, severity, message, active, notification_count, "
+        f"       created_at, updated_at, resolved_at, last_notified_at "
+        f"FROM alerts WHERE {where} ORDER BY created_at DESC LIMIT %s",
+        (device_id, limit)
+    )
+    now = datetime.now(timezone.utc)
+    result = []
+    for r in rows:
+        created = r[6]
+        if created and created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age_sec = int((now - created).total_seconds()) if created else None
+        result.append({
+            "id":                 r[0],
+            "code":               r[1],
+            "severity":           r[2],
+            "message":            r[3],
+            "active":             r[4],
+            "notification_count": r[5],
+            "created_at":         created.isoformat() if created else None,
+            "updated_at":         r[7].isoformat() if r[7] else None,
+            "resolved_at":        r[8].isoformat() if r[8] else None,
+            "last_notified_at":   r[9].isoformat() if r[9] else None,
+            "age_seconds":        age_sec,
+        })
+    return jsonify(result)
+
+
+@api.route("/api/alerts/ack/<int:alert_id>", methods=["POST"])
+def ack_alert(alert_id):
+    """Acknowledge (resolve) an active alert by ID."""
+    db.execute(
+        "UPDATE alerts SET active=FALSE, resolved_at=NOW(), updated_at=NOW() "
+        "WHERE id=%s AND active=TRUE",
+        (alert_id,)
+    )
+    log.info(f"[ALERT] ACK — id={alert_id}")
+    return jsonify({"id": alert_id, "acked": True})
+
 
 @api.route("/api/business/<device_id>", methods=["GET"])
 def get_business_history(device_id):
@@ -3050,7 +3484,8 @@ h1{font-size:1.3rem;letter-spacing:.06em;color:#64748b;margin-bottom:1.75rem;tex
 .btn-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem}
 button{padding:.7rem;border:none;border-radius:6px;font-size:.88rem;font-weight:700;
   cursor:pointer;letter-spacing:.04em;transition:opacity .12s}
-button:hover{opacity:.82}button:active{opacity:.65}button:disabled{opacity:.3;cursor:not-allowed}
+button:hover:not(:disabled){opacity:.82}button:active:not(:disabled){opacity:.65}
+button:disabled{opacity:.28;cursor:not-allowed}
 .bs{background:#16a34a;color:#fff}.bst{background:#dc2626;color:#fff}
 .bf{background:#2563eb;color:#fff}.br2{background:#d97706;color:#fff}
 .rbox{background:#0f1117;border:1px solid #2d3348;border-radius:6px;padding:.7rem 1rem;
@@ -3062,16 +3497,44 @@ button:hover{opacity:.82}button:active{opacity:.65}button:disabled{opacity:.3;cu
 select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
   padding:.38rem .7rem;border-radius:6px;font-size:.83rem;margin-bottom:1.25rem}
 #ri{font-size:.68rem;color:#334155;margin-left:.5rem}
+.id-name{font-size:1.05rem;font-weight:700;color:#e2e8f0}
+.id-did{font-size:.72rem;color:#475569;font-family:monospace;margin-top:.25rem}
+.id-meta{font-size:.68rem;color:#334155;margin-top:.3rem}
+.seen-row{display:flex;gap:1rem;align-items:baseline;margin-top:.55rem;flex-wrap:wrap}
+.cfg-grid{display:grid;grid-template-columns:1fr 1fr;gap:.75rem;margin-bottom:1rem}
+.cfg-section{font-size:.65rem;text-transform:uppercase;letter-spacing:.08em;color:#475569;
+  padding-top:.5rem;grid-column:1/-1;border-top:1px solid #1a1f2e}
+.cfg-section:first-child{border-top:none;padding-top:0}
+.cfg-field label{display:block;font-size:.65rem;color:#475569;text-transform:uppercase;
+  letter-spacing:.08em;margin-bottom:.3rem}
+.cfg-field input{width:100%;background:#0f1117;border:1px solid #2d3348;color:#e2e8f0;
+  padding:.45rem .65rem;border-radius:6px;font-size:.85rem}
+.cfg-field input:focus{outline:none;border-color:#3b82f6}
+.hint{font-size:.65rem;color:#334155;margin-top:.6rem}
+.alert-row{display:flex;gap:.5rem;align-items:flex-start;
+  padding:.42rem 0;border-bottom:1px solid #1a1f2e}
+.alert-row:last-child{border-bottom:none}
+.alert-body{flex:1;min-width:0}
+.alert-code{font-weight:700;font-size:.8rem}
+.alert-msg{font-size:.7rem;color:#94a3b8;margin-top:.1rem;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.alert-time{font-size:.62rem;color:#334155;margin-top:.1rem}
 </style>
 </head>
 <body>
 <h1>⚙ KAIROX Admin</h1>
 
 <label class="meta">Dispositivo</label><br>
-<select id="dev" onchange="poll()">
-{% for d in devices %}<option value="{{ d }}">{{ d }}</option>{% endfor %}
+<select id="dev" onchange="onDevChange()">
+{% for d in devices %}<option value="{{ d.device_id }}">{{ d.display_name }} · {{ d.device_id }}</option>{% endfor %}
 </select>
 <span id="ri">—</span>
+
+<div class="card">
+  <div class="id-name" id="id-name">{{ devices[0].display_name if devices }}</div>
+  <div class="id-did"  id="id-did">{{ devices[0].device_id if devices }}</div>
+  <div class="id-meta" id="id-meta">{% if devices and devices[0].installed_at %}Instalado: {{ devices[0].installed_at[:10] }}{% endif %}</div>
+</div>
 
 <div class="card">
   <div class="card-title">Estado</div>
@@ -3079,20 +3542,61 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
     <span id="b-online" class="badge bg2">···</span>
     <span id="b-fsm"    class="badge bg2">···</span>
   </div>
-  <p class="meta" style="margin-top:.55rem" id="b-seen">Cargando...</p>
+  <div class="seen-row">
+    <span class="meta" id="b-seen">—</span>
+    <span class="meta" id="b-age"></span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Alertas activas</div>
+  <div id="alerts-list"><span class="meta">Cargando...</span></div>
 </div>
 
 <div class="card">
   <div class="card-title">Comandos</div>
   <div class="btn-grid">
-    <button class="bs"  onclick="send('START')">START</button>
-    <button class="bst" onclick="send('STOP')">STOP</button>
-    <button class="bf"  onclick="send('FLUSH')">FLUSH</button>
-    <button class="br2" onclick="send('RST')">RST</button>
+    <button id="btn-start" class="bs"  onclick="send('START')" disabled>START</button>
+    <button id="btn-stop"  class="bst" onclick="send('STOP')"  disabled>STOP</button>
+    <button id="btn-flush" class="bf"  onclick="send('FLUSH')" disabled>FLUSH</button>
+    <button id="btn-rst"   class="br2" onclick="send('RST')"   disabled>RST</button>
   </div>
-  <p class="meta" style="margin-top:.55rem">
-    Validaciones ocurren en el backend y en el firmware.
-  </p>
+  <p class="hint" id="cmd-hint">Esperando estado del dispositivo...</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Configuración</div>
+  <div class="cfg-grid">
+    <div class="cfg-section">Calibración sensores</div>
+    <div class="cfg-field">
+      <label>Factor Q1 (pulsos/L)</label>
+      <input type="number" id="ff1" step="1" min="10" max="5000" placeholder="450">
+    </div>
+    <div class="cfg-field">
+      <label>Factor Q2 (pulsos/L)</label>
+      <input type="number" id="ff2" step="1" min="10" max="5000" placeholder="450">
+    </div>
+    <div class="cfg-field">
+      <label>Temperatura TDS (°C)</label>
+      <input type="number" id="tds-t" step="0.5" min="0" max="80" placeholder="25">
+    </div>
+    <div class="cfg-section">KPIs operacionales</div>
+    <div class="cfg-field">
+      <label>Potencia bomba (kW)</label>
+      <input type="number" id="pump-kw" step="0.01" min="0" max="50" placeholder="0.75">
+    </div>
+    <div class="cfg-field">
+      <label>Costo energía ($/kWh)</label>
+      <input type="number" id="cost-kwh" step="0.01" min="0" placeholder="0.12">
+    </div>
+    <div class="cfg-field">
+      <label>Meta diaria (L)</label>
+      <input type="number" id="daily-l" step="10" min="0" placeholder="0">
+    </div>
+  </div>
+  <button onclick="saveConfig()" style="background:#7c3aed;color:#fff;width:100%;padding:.75rem">
+    Guardar configuración
+  </button>
 </div>
 
 <div class="card">
@@ -3124,32 +3628,150 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
 </div>
 
 <script>
-const FSM = {
+const DEVICES = {
+{% for d in devices %}"{{ d.device_id }}": {"name": "{{ d.display_name }}", "installed": "{{ d.installed_at }}"},
+{% endfor %}};
+
+const FSM_COLOR = {
   PRODUCING:'bg', FLUSHING:'bb', STARTING:'by',
   FAULT:'br',     IDLE:'bg2',    STOPPING:'bg2', UNKNOWN:'bg2'
 };
+
+// Commands allowed per FSM state — frontend hint only; backend+firmware enforce.
+const CMD_STATES = {
+  START: ['IDLE'],
+  STOP:  ['PRODUCING', 'STARTING', 'FLUSHING'],
+  FLUSH: ['PRODUCING'],
+  RST:   ['FAULT', 'STARTING', 'FLUSHING'],
+};
+
+const CMD_HINT = {
+  IDLE:      'START disponible',
+  PRODUCING: 'STOP · FLUSH disponibles',
+  STARTING:  'STOP · RST disponibles',
+  FLUSHING:  'STOP · RST disponibles',
+  STOPPING:  'Esperando IDLE...',
+  FAULT:     'RST disponible',
+  UNKNOWN:   'Sin estado confirmado',
+};
+
 const STATUS_COLOR = {
   EXECUTED:'#4ade80', REJECTED:'#f87171',
   TIMEOUT:'#fbbf24',  SENT:'#94a3b8'
 };
 
+let currentFsm = 'UNKNOWN';
+
 function dev(){ return document.getElementById('dev').value; }
+
+function updateButtons(){
+  const f = currentFsm;
+  document.getElementById('btn-start').disabled = !CMD_STATES.START.includes(f);
+  document.getElementById('btn-stop').disabled  = !CMD_STATES.STOP.includes(f);
+  document.getElementById('btn-flush').disabled = !CMD_STATES.FLUSH.includes(f);
+  document.getElementById('btn-rst').disabled   = !CMD_STATES.RST.includes(f);
+  document.getElementById('cmd-hint').textContent = CMD_HINT[f] || '—';
+}
+
+function onDevChange(){
+  const d = dev();
+  const info = DEVICES[d] || {};
+  document.getElementById('id-name').textContent = info.name || d;
+  document.getElementById('id-did').textContent  = d;
+  const ia = info.installed || '';
+  document.getElementById('id-meta').textContent = ia ? 'Instalado: ' + ia.slice(0,10) : '';
+  currentFsm = 'UNKNOWN';
+  updateButtons();
+  poll();
+  pollAi();
+  loadConfig();
+  fetchAlerts();
+}
+
+function fmtAge(sec){
+  if(sec == null) return '';
+  if(sec < 60)   return sec+'s';
+  if(sec < 3600) return Math.floor(sec/60)+'m '+( sec%60)+'s';
+  return Math.floor(sec/3600)+'h '+Math.floor((sec%3600)/60)+'m';
+}
+
+async function ackAlert(id){
+  try {
+    await fetch('/api/alerts/ack/'+id, {method:'POST'});
+    fetchAlerts();
+  } catch(e){}
+}
+
+async function fetchAlerts(){
+  try {
+    const r = await fetch('/api/alerts/'+dev()+'?active=false&limit=15');
+    if(!r.ok) return;
+    const alerts = await r.json();
+    const el = document.getElementById('alerts-list');
+    if(!alerts.length){
+      el.innerHTML = '<span class="meta">Sin alertas recientes</span>';
+      return;
+    }
+    const SEV_CLS   = {CRITICAL:'br', WARNING:'by', INFO:'bb'};
+    const SEV_ICONS = {CRITICAL:'🔴', WARNING:'⚠', INFO:'ℹ'};
+    el.innerHTML = alerts.map(a => {
+      const cls  = SEV_CLS[a.severity]   || 'bg2';
+      const icon = SEV_ICONS[a.severity] || '•';
+      const ts   = a.created_at ? a.created_at.replace('T',' ').slice(0,16)+' UTC' : '—';
+      const age  = a.active ? fmtAge(a.age_seconds) : '';
+      const msg  = a.message.length > 90 ? a.message.slice(0,90)+'…' : a.message;
+      const notif = a.notification_count > 0 ? ' · '+a.notification_count+'× notif.' : '';
+      const statusBadge = a.active
+        ? '<span class="badge br" style="font-size:0.7rem;padding:1px 6px">ACTIVA</span>'
+        : '<span class="badge bg2" style="font-size:0.7rem;padding:1px 6px">RESUELTA</span>';
+      const ackBtn = a.active
+        ? '<button onclick="ackAlert('+a.id+')" style="font-size:0.72rem;padding:2px 8px;border:1px solid #475569;background:#1e293b;color:#94a3b8;border-radius:4px;cursor:pointer">ACK</button>'
+        : '';
+      return '<div class="alert-row" style="align-items:flex-start;gap:8px">'
+        +'<span class="badge '+cls+'" style="min-width:4.5rem;text-align:center;flex-shrink:0;font-size:0.75rem">'+icon+' '+a.severity+'</span>'
+        +'<div class="alert-body" style="flex:1;min-width:0">'
+        +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+        +'<span class="alert-code">'+a.code+'</span>'+statusBadge
+        +(age ? '<span class="meta" style="font-size:0.72rem">'+age+'</span>' : '')
+        +'</div>'
+        +'<div class="alert-msg">'+msg+'</div>'
+        +'<div class="alert-time">'+ts+notif+'</div>'
+        +'</div>'
+        +(ackBtn ? '<div style="flex-shrink:0">'+ackBtn+'</div>' : '')
+        +'</div>';
+    }).join('');
+  } catch(e){}
+}
 
 async function poll(){
   const d = dev();
   try {
     const r = await fetch('/api/status/'+d);
     if(r.ok){
-      const s = await r.json();
+      const s   = await r.json();
       const fsm = s.state || 'UNKNOWN';
+      currentFsm = fsm;
+
       const ob = document.getElementById('b-online');
       ob.textContent = s.online ? 'ONLINE' : 'OFFLINE';
-      ob.className = 'badge '+(s.online ? 'bg' : 'br');
+      ob.className   = 'badge '+(s.online ? 'bg' : 'br');
+
       const fb = document.getElementById('b-fsm');
       fb.textContent = fsm;
-      fb.className = 'badge '+(FSM[fsm]||'bg2');
-      document.getElementById('b-seen').textContent =
-        'Último contacto: '+( s.last_seen||'—' );
+      fb.className   = 'badge '+(FSM_COLOR[fsm]||'bg2');
+
+      const seenEl = document.getElementById('b-seen');
+      const ageEl  = document.getElementById('b-age');
+      if(s.last_seen && s.last_seen !== 'None'){
+        seenEl.textContent = 'Último contacto: ' + s.last_seen.replace('T',' ').slice(0,19) + ' UTC';
+        const sec = s.seconds_since_seen;
+        ageEl.textContent  = sec != null ? '(' + sec + 's)' : '';
+      } else {
+        seenEl.textContent = 'Sin contacto registrado';
+        ageEl.textContent  = '';
+      }
+
+      updateButtons();
     }
   } catch(e){}
 
@@ -3157,13 +3779,13 @@ async function poll(){
     const r = await fetch('/api/command/'+d);
     if(r.ok){
       const cmds = await r.json();
-      const el = document.getElementById('hist');
+      const el   = document.getElementById('hist');
       if(!cmds.length){
         el.innerHTML = '<span class="meta">Sin comandos registrados</span>';
       } else {
         el.innerHTML = cmds.slice(0,5).map(c => {
-          const ts = (c.issued_at||'').replace('T',' ').slice(0,19);
-          const sc = STATUS_COLOR[c.status]||'#94a3b8';
+          const ts  = (c.issued_at||'').replace('T',' ').slice(0,19);
+          const sc  = STATUS_COLOR[c.status]||'#94a3b8';
           const rej = c.reject_reason
             ? '<span class="meta" style="color:#f87171">'+c.reject_reason+'</span>' : '';
           return '<div class="crow">'
@@ -3176,13 +3798,15 @@ async function poll(){
     }
   } catch(e){}
 
-  document.getElementById('ri').textContent =
-    '↻ '+new Date().toLocaleTimeString();
+  document.getElementById('ri').textContent = '↻ '+new Date().toLocaleTimeString();
+  fetchAlerts();
 }
 
 async function send(cmd){
-  const btns = document.querySelectorAll('button');
-  btns.forEach(b => b.disabled=true);
+  // Disable all command buttons during send
+  ['btn-start','btn-stop','btn-flush','btn-rst'].forEach(id =>
+    document.getElementById(id).disabled = true
+  );
   const box = document.getElementById('resp');
   box.className = 'rbox'; box.textContent = 'Enviando '+cmd+'...';
   try {
@@ -3192,25 +3816,67 @@ async function send(cmd){
       body: JSON.stringify({cmd})
     });
     const data = await r.json();
-    box.className = 'rbox '+(r.ok?'ok':'er');
+    box.className   = 'rbox '+(r.ok?'ok':'er');
     box.textContent = JSON.stringify(data, null, 2);
     if(r.ok) setTimeout(poll, 1500);
   } catch(e){
-    box.className = 'rbox er';
+    box.className   = 'rbox er';
     box.textContent = 'Error de red: '+e.message;
   } finally {
-    btns.forEach(b => b.disabled=false);
+    updateButtons();
+  }
+}
+
+async function loadConfig(){
+  try {
+    const r = await fetch('/api/config/'+dev());
+    if(!r.ok) return;
+    const c = await r.json();
+    document.getElementById('ff1').value      = c.flow_factor_1       ?? '';
+    document.getElementById('ff2').value      = c.flow_factor_2       ?? '';
+    document.getElementById('tds-t').value    = c.tds_temperature     ?? '';
+    document.getElementById('pump-kw').value  = c.pump_power_kw       ?? '';
+    document.getElementById('cost-kwh').value = c.cost_kwh            ?? '';
+    document.getElementById('daily-l').value  = c.daily_target_liters ?? '';
+  } catch(e){}
+}
+
+async function saveConfig(){
+  const box = document.getElementById('resp');
+  box.className = 'rbox'; box.textContent = 'Guardando configuración...';
+  const payload = {
+    flow_factor_1:       parseFloat(document.getElementById('ff1').value)      || 450,
+    flow_factor_2:       parseFloat(document.getElementById('ff2').value)      || 450,
+    tds_temperature:     parseFloat(document.getElementById('tds-t').value)    || 25,
+    pump_power_kw:       parseFloat(document.getElementById('pump-kw').value)  || 0.75,
+    cost_kwh:            parseFloat(document.getElementById('cost-kwh').value) || 0.12,
+    daily_target_liters: parseFloat(document.getElementById('daily-l').value)  || 0,
+  };
+  try {
+    const r = await fetch('/api/config/'+dev(), {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await r.json();
+    box.className   = 'rbox '+(r.ok?'ok':'er');
+    box.textContent = JSON.stringify(data, null, 2);
+  } catch(e){
+    box.className   = 'rbox er';
+    box.textContent = 'Error: '+e.message;
   }
 }
 
 setInterval(poll, 5000);
 poll();
+loadConfig();
+fetchAlerts();
 
 // ── AI Integration ──────────────────────────────────────────────────────────
 const AI_MODE_COLOR = {OFF:'bg2', VIEWER:'bb', AUTO:'bg'};
 const EXEC_COLOR    = {SUCCESS:'#4ade80', REJECTED:'#fbbf24', FAILED:'#f87171'};
 
-let aiPollBusy = false;   // prevent overlapping concurrent requests
+let aiPollBusy = false;
 
 async function pollAi(){
   if(aiPollBusy) return;
@@ -3289,12 +3955,16 @@ def admin_panel():
     via fetch() — no MQTT access from the browser.
     All command execution goes through CommandEngine as normal.
     """
-    devices = [r[0] for r in db.fetchall(
-        "SELECT device_id FROM devices ORDER BY registered_at"
-    )]
-    if not devices:
+    rows = db.fetchall(
+        "SELECT device_id, display_name, installed_at FROM devices ORDER BY registered_at"
+    )
+    if not rows:
         return ("<h2 style='font-family:sans-serif;padding:2rem'>"
                 "No hay dispositivos registrados.</h2>"), 200
+    devices = [
+        {"device_id": r[0], "display_name": r[1] or r[0], "installed_at": str(r[2]) if r[2] else ""}
+        for r in rows
+    ]
     return render_template_string(_ADMIN_PANEL_HTML, devices=devices)
 
 
@@ -3378,6 +4048,10 @@ def main():
         log.critical("No se pudo conectar a la DB. Abortando.")
         return
 
+    # Safe schema migrations (idempotent)
+    db.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notification_count INTEGER NOT NULL DEFAULT 0")
+    log.info("✅ Schema migrations aplicadas")
+
     api_thread = threading.Thread(target=_start_api, daemon=True)
     api_thread.start()
     log.info("✅ API HTTP en puerto 8080")
@@ -3399,6 +4073,10 @@ def main():
     mqtt_client    = client
     command_engine = CommandEngine(client)
     command_engine.start()
+
+    telegram_worker.start()
+    email_worker.start()
+    offline_checker.start()
 
     ai_decision_engine = AIDecisionEngine()
     ai_decision_engine.start()
