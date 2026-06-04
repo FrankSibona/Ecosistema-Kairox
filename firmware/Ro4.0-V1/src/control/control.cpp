@@ -27,6 +27,20 @@ int Control::getRetryCount() {
     return retryCount;
 }
 
+FaultReason Control::getFaultReason() {
+    return faultReason;
+}
+
+const char* Control::getFaultReasonName() {
+    switch (faultReason) {
+        case FaultReason::MAX_RETRIES:   return "MAX_RETRIES";
+        case FaultReason::FLOW_LOW:      return "FLOW_LOW";
+        case FaultReason::RECOVERY_LOW:  return "RECOVERY_LOW";
+        case FaultReason::RECOVERY_HIGH: return "RECOVERY_HIGH";
+        default:                         return "";
+    }
+}
+
 const char* Control::getStateName() {
     return stateToString(state);
 }
@@ -188,13 +202,82 @@ void Control::update(Sensors &s, Commands &cmds) {
 
             if (!demandaOK) {
                 Serial.println("[EVENT] Fin demanda -> flushing");
+                // Reset protection timers on clean exit — no fault condition
+                flowFaultArmed     = false;
+                recoveryFaultArmed = false;
                 state = FLUSHING;
                 stateStartTime = millis();
+                break;
             }
 
             if (!crudoOK || !presionOK) {
                 Serial.println("[FAULT] Pérdida condición");
+                flowFaultArmed     = false;
+                recoveryFaultArmed = false;
                 state = IDLE;
+                break;
+            }
+
+            // ── Protección de caudal de permeado ─────────────────────────────
+            {
+                const SensorConfig& cfg = s.getConfig();
+                float flowP = s.getFlow1();
+                unsigned long delayMs = (unsigned long)cfg.flow_fault_delay_sec * 1000UL;
+
+                if (flowP < cfg.min_flow_lpm) {
+                    if (!flowFaultArmed) {
+                        flowFaultTimer = millis();
+                        flowFaultArmed = true;
+                    } else if (millis() - flowFaultTimer >= delayMs) {
+                        Serial.printf("[FAULT] FLOW_LOW: %.2f L/min < %.2f L/min (umbral)\n",
+                                      flowP, cfg.min_flow_lpm);
+                        faultReason    = FaultReason::FLOW_LOW;
+                        flowFaultArmed = false;
+                        state          = FAULT;
+                        break;
+                    }
+                } else {
+                    flowFaultArmed = false;
+                }
+            }
+
+            // ── Protección de recovery ────────────────────────────────────────
+            {
+                const SensorConfig& cfg = s.getConfig();
+                float flowP = s.getFlow1();
+                float flowR = s.getFlow2();
+                float total = flowP + flowR;
+
+                if (total > 0.1f) {
+                    float recoveryPct = (flowP / total) * 100.0f;
+                    bool outOfRange = (recoveryPct < cfg.min_recovery_pct) ||
+                                      (recoveryPct > cfg.max_recovery_pct);
+                    unsigned long delayMs = (unsigned long)cfg.recovery_fault_delay_sec * 1000UL;
+
+                    if (outOfRange) {
+                        if (!recoveryFaultArmed) {
+                            recoveryFaultTimer = millis();
+                            recoveryFaultArmed = true;
+                        } else if (millis() - recoveryFaultTimer >= delayMs) {
+                            if (recoveryPct < cfg.min_recovery_pct) {
+                                Serial.printf("[FAULT] RECOVERY_LOW: %.1f%% < %.1f%% (umbral)\n",
+                                              recoveryPct, cfg.min_recovery_pct);
+                                faultReason = FaultReason::RECOVERY_LOW;
+                            } else {
+                                Serial.printf("[FAULT] RECOVERY_HIGH: %.1f%% > %.1f%% (umbral)\n",
+                                              recoveryPct, cfg.max_recovery_pct);
+                                faultReason = FaultReason::RECOVERY_HIGH;
+                            }
+                            recoveryFaultArmed = false;
+                            state = FAULT;
+                            break;
+                        }
+                    } else {
+                        recoveryFaultArmed = false;
+                    }
+                } else {
+                    recoveryFaultArmed = false;  // sin flujo medible — no evaluar
+                }
             }
             break;
 
@@ -216,7 +299,8 @@ void Control::update(Sensors &s, Commands &cmds) {
             break;
     }
 
-    if (retryCount >= MAX_RETRIES) {
+    if (retryCount >= MAX_RETRIES && state != FAULT) {
+        faultReason = FaultReason::MAX_RETRIES;
         state = FAULT;
     }
 
@@ -267,8 +351,11 @@ void Control::applyCommand(CommandType cmd) {
             stateStartTime = millis();
             break;
         case CommandType::RST:
-            retryCount = 0;
-            state = IDLE;
+            retryCount         = 0;
+            faultReason        = FaultReason::NONE;
+            flowFaultArmed     = false;
+            recoveryFaultArmed = false;
+            state              = IDLE;
             break;
         default:
             break;

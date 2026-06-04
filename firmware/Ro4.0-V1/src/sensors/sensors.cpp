@@ -55,10 +55,16 @@ void Sensors::loadConfig() {
     }
 
     SensorConfig loaded;
-    loaded.flow_factor_1   = p.getFloat("ff1",   FLOW_FACTOR_DEFAULT);
-    loaded.flow_factor_2   = p.getFloat("ff2",   FLOW_FACTOR_DEFAULT);
-    loaded.tds_temperature = p.getFloat("tds_t", TDS_TEMPERATURE_DEFAULT);
-    loaded.updated_at      = p.getULong("ts",    0);
+    loaded.flow_factor_1             = p.getFloat ("ff1",    FLOW_FACTOR_DEFAULT);
+    loaded.flow_factor_2             = p.getFloat ("ff2",    FLOW_FACTOR_DEFAULT);
+    loaded.tds_temperature           = p.getFloat ("tds_t",  TDS_TEMPERATURE_DEFAULT);
+    loaded.min_flow_lpm              = p.getFloat ("min_fl", MIN_FLOW_LPM_DEFAULT);
+    loaded.max_flow_lpm              = p.getFloat ("max_fl", MAX_FLOW_LPM_DEFAULT);
+    loaded.flow_fault_delay_sec      = p.getUInt  ("flt_d",  FLOW_FAULT_DELAY_SEC_DEFAULT);
+    loaded.min_recovery_pct          = p.getFloat ("min_rec",MIN_RECOVERY_PCT_DEFAULT);
+    loaded.max_recovery_pct          = p.getFloat ("max_rec",MAX_RECOVERY_PCT_DEFAULT);
+    loaded.recovery_fault_delay_sec  = p.getUInt  ("rec_d",  RECOVERY_FAULT_DELAY_SEC_DEFAULT);
+    loaded.updated_at                = p.getULong ("ts",     0);
     p.end();
 
     if (!isValidConfig(loaded)) {
@@ -68,20 +74,30 @@ void Sensors::loadConfig() {
     }
 
     _cfg = loaded;
-    Serial.printf("[CFG] Cargado: ff1=%.1f ff2=%.1f tds_t=%.1f ts=%lu\n",
-                  _cfg.flow_factor_1, _cfg.flow_factor_2,
-                  _cfg.tds_temperature, _cfg.updated_at);
+    Serial.printf("[CFG] Cargado: ff1=%.1f ff2=%.1f tds_t=%.1f "
+                  "min_fl=%.2f max_fl=%.1f flt_d=%u "
+                  "min_rec=%.1f max_rec=%.1f rec_d=%u ts=%lu\n",
+                  _cfg.flow_factor_1, _cfg.flow_factor_2, _cfg.tds_temperature,
+                  _cfg.min_flow_lpm, _cfg.max_flow_lpm, _cfg.flow_fault_delay_sec,
+                  _cfg.min_recovery_pct, _cfg.max_recovery_pct,
+                  _cfg.recovery_fault_delay_sec, _cfg.updated_at);
 }
 
 void Sensors::saveConfig() {
     Preferences p;
     p.begin("kx_cfg", false);
-    p.putUInt("magic",   _cfg.magic);
-    p.putUInt("version", _cfg.version);
-    p.putFloat("ff1",    _cfg.flow_factor_1);
-    p.putFloat("ff2",    _cfg.flow_factor_2);
-    p.putFloat("tds_t",  _cfg.tds_temperature);
-    p.putULong("ts",     _cfg.updated_at);
+    p.putUInt ("magic",   _cfg.magic);
+    p.putUInt ("version", _cfg.version);
+    p.putFloat("ff1",     _cfg.flow_factor_1);
+    p.putFloat("ff2",     _cfg.flow_factor_2);
+    p.putFloat("tds_t",   _cfg.tds_temperature);
+    p.putFloat("min_fl",  _cfg.min_flow_lpm);
+    p.putFloat("max_fl",  _cfg.max_flow_lpm);
+    p.putUInt ("flt_d",   _cfg.flow_fault_delay_sec);
+    p.putFloat("min_rec", _cfg.min_recovery_pct);
+    p.putFloat("max_rec", _cfg.max_recovery_pct);
+    p.putUInt ("rec_d",   _cfg.recovery_fault_delay_sec);
+    p.putULong("ts",      _cfg.updated_at);
     p.end();
 }
 
@@ -96,9 +112,15 @@ bool Sensors::isValidConfig(const SensorConfig& c) {
     auto inRange = [](float v, float lo, float hi) -> bool {
         return !isnan(v) && !isinf(v) && v >= lo && v <= hi;
     };
-    return inRange(c.flow_factor_1,   10.0f, 5000.0f)
-        && inRange(c.flow_factor_2,   10.0f, 5000.0f)
-        && inRange(c.tds_temperature,  0.0f,   80.0f);
+    return inRange(c.flow_factor_1,       10.0f, 5000.0f)
+        && inRange(c.flow_factor_2,       10.0f, 5000.0f)
+        && inRange(c.tds_temperature,      0.0f,   80.0f)
+        && inRange(c.min_flow_lpm,         0.0f,   50.0f)
+        && inRange(c.max_flow_lpm,         0.1f,  100.0f)
+        && c.flow_fault_delay_sec >= 5  && c.flow_fault_delay_sec <= 300
+        && inRange(c.min_recovery_pct,     1.0f,   99.0f)
+        && inRange(c.max_recovery_pct,     1.0f,   99.0f)
+        && c.recovery_fault_delay_sec >= 5 && c.recovery_fault_delay_sec <= 300;
 }
 
 // Applies config if: (a) it passes validation AND (b) it is newer than current.
@@ -117,9 +139,13 @@ bool Sensors::setConfig(const SensorConfig& incoming) {
     }
     _cfg = incoming;
     saveConfig();
-    Serial.printf("[CFG] APLICADA: ff1=%.1f ff2=%.1f tds_t=%.1f ts=%lu\n",
-                  _cfg.flow_factor_1, _cfg.flow_factor_2,
-                  _cfg.tds_temperature, _cfg.updated_at);
+    Serial.printf("[CFG] APLICADA: ff1=%.1f ff2=%.1f tds_t=%.1f "
+                  "min_fl=%.2f max_fl=%.1f flt_d=%u "
+                  "min_rec=%.1f max_rec=%.1f rec_d=%u ts=%lu\n",
+                  _cfg.flow_factor_1, _cfg.flow_factor_2, _cfg.tds_temperature,
+                  _cfg.min_flow_lpm, _cfg.max_flow_lpm, _cfg.flow_fault_delay_sec,
+                  _cfg.min_recovery_pct, _cfg.max_recovery_pct,
+                  _cfg.recovery_fault_delay_sec, _cfg.updated_at);
     return true;
 }
 

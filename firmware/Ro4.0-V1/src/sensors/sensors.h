@@ -19,6 +19,14 @@ struct SensorConfig {
     float         flow_factor_1   = FLOW_FACTOR_DEFAULT;   // pulsos/litro — caudalímetro permeado
     float         flow_factor_2   = FLOW_FACTOR_DEFAULT;   // pulsos/litro — caudalímetro rechazo
     float         tds_temperature = TDS_TEMPERATURE_DEFAULT; // °C — compensación térmica TDS
+    // ── Protecciones de proceso ──────────────────────────────────────────────
+    float         min_flow_lpm              = MIN_FLOW_LPM_DEFAULT;
+    float         max_flow_lpm              = MAX_FLOW_LPM_DEFAULT;
+    uint32_t      flow_fault_delay_sec      = FLOW_FAULT_DELAY_SEC_DEFAULT;
+    float         min_recovery_pct          = MIN_RECOVERY_PCT_DEFAULT;
+    float         max_recovery_pct          = MAX_RECOVERY_PCT_DEFAULT;
+    uint32_t      recovery_fault_delay_sec  = RECOVERY_FAULT_DELAY_SEC_DEFAULT;
+    // ────────────────────────────────────────────────────────────────────────
     unsigned long updated_at      = 0;                     // unix timestamp del último update
 };
 

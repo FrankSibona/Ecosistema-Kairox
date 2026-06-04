@@ -36,6 +36,15 @@
 #define FLOW_FACTOR_DEFAULT     450.0f
 #define TDS_TEMPERATURE_DEFAULT  25.0f  // °C — compensación térmica TDS (nominal)
 
+// ── Protecciones de proceso (configurables vía MQTT/Flask) ───────────────────
+#define MIN_FLOW_LPM_DEFAULT          0.2f   // L/min — mínimo permeado en PRODUCING
+#define MAX_FLOW_LPM_DEFAULT         20.0f   // L/min — máximo permeado (reservado)
+#define FLOW_FAULT_DELAY_SEC_DEFAULT   30U    // segundos continuo fuera de rango → FAULT
+
+#define MIN_RECOVERY_PCT_DEFAULT      10.0f  // % — recovery mínima en PRODUCING
+#define MAX_RECOVERY_PCT_DEFAULT      85.0f  // % — recovery máxima en PRODUCING
+#define RECOVERY_FAULT_DELAY_SEC_DEFAULT 60U // segundos continuo fuera de rango → FAULT
+
 // ── NVS config integrity ──────────────────────────────────────────────────────
 // CFG_MAGIC is written alongside calibration data in NVS namespace "kx_cfg".
 // On load, if magic or version don't match, the entire stored config is

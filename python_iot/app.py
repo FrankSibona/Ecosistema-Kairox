@@ -2706,7 +2706,9 @@ def get_config(device_id):
     rows = db.fetchall(
         "SELECT pump_power_kw,cost_kwh,cost_water_m3,target_recovery,"
         "target_efficiency,daily_target_liters,friendly_name,location,"
-        "flow_factor_1,flow_factor_2,tds_temperature "
+        "flow_factor_1,flow_factor_2,tds_temperature,"
+        "min_flow_lpm,max_flow_lpm,flow_fault_delay_sec,"
+        "min_recovery_pct,max_recovery_pct,recovery_fault_delay_sec "
         "FROM device_config WHERE device_id=%s",
         (device_id,)
     )
@@ -2714,27 +2716,39 @@ def get_config(device_id):
         return jsonify({"error": "device not found"}), 404
     r = rows[0]
     return jsonify({
-        "pump_power_kw":       r[0],  "cost_kwh":          r[1],
-        "cost_water_m3":       r[2],  "target_recovery":   r[3],
-        "target_efficiency":   r[4],  "daily_target_liters": r[5],
-        "friendly_name":       r[6],  "location":          r[7],
-        "flow_factor_1":       r[8],  "flow_factor_2":     r[9],
-        "tds_temperature":     r[10],
+        "pump_power_kw":            r[0],  "cost_kwh":              r[1],
+        "cost_water_m3":            r[2],  "target_recovery":       r[3],
+        "target_efficiency":        r[4],  "daily_target_liters":   r[5],
+        "friendly_name":            r[6],  "location":              r[7],
+        "flow_factor_1":            r[8],  "flow_factor_2":         r[9],
+        "tds_temperature":          r[10],
+        "min_flow_lpm":             r[11], "max_flow_lpm":          r[12],
+        "flow_fault_delay_sec":     r[13],
+        "min_recovery_pct":         r[14], "max_recovery_pct":      r[15],
+        "recovery_fault_delay_sec": r[16],
     })
 
 @api.route("/api/config/<device_id>", methods=["POST"])
 def set_config(device_id):
-    data = request.get_json(silent=True) or {}
-    ff1  = float(data.get("flow_factor_1",  450.0))
-    ff2  = float(data.get("flow_factor_2",  450.0))
-    tds_t = float(data.get("tds_temperature", 25.0))
+    data  = request.get_json(silent=True) or {}
+    ff1   = float(data.get("flow_factor_1",   450.0))
+    ff2   = float(data.get("flow_factor_2",   450.0))
+    tds_t = float(data.get("tds_temperature",  25.0))
+    min_flow      = float(data.get("min_flow_lpm",              0.2))
+    max_flow      = float(data.get("max_flow_lpm",             20.0))
+    flow_delay    = int(  data.get("flow_fault_delay_sec",       30))
+    min_rec       = float(data.get("min_recovery_pct",          10.0))
+    max_rec       = float(data.get("max_recovery_pct",          85.0))
+    rec_delay     = int(  data.get("recovery_fault_delay_sec",   60))
     db.execute(
         "INSERT INTO device_config "
         "(device_id,pump_power_kw,cost_kwh,cost_water_m3,"
         "target_recovery,target_efficiency,daily_target_liters,"
         "flow_factor_1,flow_factor_2,tds_temperature,"
+        "min_flow_lpm,max_flow_lpm,flow_fault_delay_sec,"
+        "min_recovery_pct,max_recovery_pct,recovery_fault_delay_sec,"
         "friendly_name,location,updated_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
         "ON CONFLICT (device_id) DO UPDATE SET "
         "pump_power_kw=EXCLUDED.pump_power_kw, cost_kwh=EXCLUDED.cost_kwh, "
         "cost_water_m3=EXCLUDED.cost_water_m3, target_recovery=EXCLUDED.target_recovery, "
@@ -2742,42 +2756,66 @@ def set_config(device_id):
         "daily_target_liters=EXCLUDED.daily_target_liters, "
         "flow_factor_1=EXCLUDED.flow_factor_1, flow_factor_2=EXCLUDED.flow_factor_2, "
         "tds_temperature=EXCLUDED.tds_temperature, "
+        "min_flow_lpm=EXCLUDED.min_flow_lpm, max_flow_lpm=EXCLUDED.max_flow_lpm, "
+        "flow_fault_delay_sec=EXCLUDED.flow_fault_delay_sec, "
+        "min_recovery_pct=EXCLUDED.min_recovery_pct, max_recovery_pct=EXCLUDED.max_recovery_pct, "
+        "recovery_fault_delay_sec=EXCLUDED.recovery_fault_delay_sec, "
         "friendly_name=EXCLUDED.friendly_name, location=EXCLUDED.location, updated_at=NOW()",
         (device_id,
          data.get("pump_power_kw", 0.75),     data.get("cost_kwh", 0.12),
          data.get("cost_water_m3", 0.80),     data.get("target_recovery", 0.65),
          data.get("target_efficiency", 0.92), data.get("daily_target_liters", 0),
          ff1, ff2, tds_t,
+         min_flow, max_flow, flow_delay,
+         min_rec, max_rec, rec_delay,
          data.get("friendly_name", ""),       data.get("location", "")),
     )
     KPIEngine.invalidate_config(device_id)
-    _publish_device_config(device_id, ff1, ff2, tds_t)
+    _publish_device_config(device_id, ff1, ff2, tds_t,
+                           min_flow, max_flow, flow_delay,
+                           min_rec, max_rec, rec_delay)
     alert_manager.fire_event(
         device_id, "CONFIG_UPDATED",
-        f"Config actualizada: ff1={ff1} ff2={ff2} tds_t={tds_t}",
+        f"Config actualizada: ff1={ff1} ff2={ff2} tds_t={tds_t} "
+        f"min_flow={min_flow} max_flow={max_flow} flow_delay={flow_delay}s "
+        f"min_rec={min_rec}% max_rec={max_rec}% rec_delay={rec_delay}s",
         cooldown_sec=60,
     )
     return jsonify({"status": "ok"})
 
 
-def _publish_device_config(device_id: str, ff1: float, ff2: float, tds_t: float):
-    """Publish retained sensor calibration config to the device via MQTT.
+def _publish_device_config(
+    device_id: str,
+    ff1: float, ff2: float, tds_t: float,
+    min_flow: float = 0.2, max_flow: float = 20.0, flow_delay: int = 30,
+    min_rec: float = 10.0, max_rec: float = 85.0, rec_delay: int = 60,
+):
+    """Publish retained sensor config + process protections to the device via MQTT.
 
     Retained so the device receives it immediately on reconnect.
     updated_at is the canonical version field — firmware applies only if newer.
+    Missing fields in payload fall back to firmware current config (safe partial update).
     """
     if not mqtt_client:
         return
     import json as _json
     import time as _time
     payload = _json.dumps({
-        "flow_factor_1":   ff1,
-        "flow_factor_2":   ff2,
-        "tds_temperature": tds_t,
-        "updated_at":      int(_time.time()),
+        "flow_factor_1":            ff1,
+        "flow_factor_2":            ff2,
+        "tds_temperature":          tds_t,
+        "min_flow_lpm":             min_flow,
+        "max_flow_lpm":             max_flow,
+        "flow_fault_delay_sec":     flow_delay,
+        "min_recovery_pct":         min_rec,
+        "max_recovery_pct":         max_rec,
+        "recovery_fault_delay_sec": rec_delay,
+        "updated_at":               int(_time.time()),
     })
     mqtt_client.publish(f"fyntek/{device_id}/config", payload, retain=True)
-    log.info(f"[{device_id}] Config MQTT publicada: ff1={ff1} ff2={ff2} tds_t={tds_t}")
+    log.info(f"[{device_id}] Config MQTT publicada: ff1={ff1} ff2={ff2} tds_t={tds_t} "
+             f"min_flow={min_flow} max_flow={max_flow} flow_delay={flow_delay}s "
+             f"min_rec={min_rec}% max_rec={max_rec}% rec_delay={rec_delay}s")
 
 @api.route("/api/baseline/<device_id>", methods=["GET"])
 def get_baseline(device_id):
@@ -3598,6 +3636,28 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
       <label>Temperatura TDS (°C)</label>
       <input type="number" id="tds-t" step="0.5" min="0" max="80" placeholder="25">
     </div>
+    <div class="cfg-section">Protección de caudal permeado</div>
+    <div class="cfg-field">
+      <label>Caudal mínimo (L/min)</label>
+      <input type="number" id="min-flow" step="0.05" min="0" max="50" placeholder="0.2">
+    </div>
+    <div class="cfg-field">
+      <label>Delay falla caudal (s)</label>
+      <input type="number" id="flow-delay" step="5" min="5" max="300" placeholder="30">
+    </div>
+    <div class="cfg-section">Protección de recovery</div>
+    <div class="cfg-field">
+      <label>Recovery mínimo (%)</label>
+      <input type="number" id="min-rec" step="1" min="1" max="99" placeholder="10">
+    </div>
+    <div class="cfg-field">
+      <label>Recovery máximo (%)</label>
+      <input type="number" id="max-rec" step="1" min="1" max="99" placeholder="85">
+    </div>
+    <div class="cfg-field">
+      <label>Delay falla recovery (s)</label>
+      <input type="number" id="rec-delay" step="5" min="5" max="300" placeholder="60">
+    </div>
     <div class="cfg-section">KPIs operacionales</div>
     <div class="cfg-field">
       <label>Potencia bomba (kW)</label>
@@ -3850,9 +3910,14 @@ async function loadConfig(){
     const r = await fetch('/api/config/'+dev());
     if(!r.ok) return;
     const c = await r.json();
-    document.getElementById('ff1').value      = c.flow_factor_1       ?? '';
-    document.getElementById('ff2').value      = c.flow_factor_2       ?? '';
-    document.getElementById('tds-t').value    = c.tds_temperature     ?? '';
+    document.getElementById('ff1').value       = c.flow_factor_1            ?? '';
+    document.getElementById('ff2').value       = c.flow_factor_2            ?? '';
+    document.getElementById('tds-t').value     = c.tds_temperature          ?? '';
+    document.getElementById('min-flow').value  = c.min_flow_lpm             ?? '';
+    document.getElementById('flow-delay').value= c.flow_fault_delay_sec     ?? '';
+    document.getElementById('min-rec').value   = c.min_recovery_pct         ?? '';
+    document.getElementById('max-rec').value   = c.max_recovery_pct         ?? '';
+    document.getElementById('rec-delay').value = c.recovery_fault_delay_sec ?? '';
     document.getElementById('pump-kw').value  = c.pump_power_kw       ?? '';
     document.getElementById('cost-kwh').value = c.cost_kwh            ?? '';
     document.getElementById('daily-l').value  = c.daily_target_liters ?? '';
@@ -3863,10 +3928,15 @@ async function saveConfig(){
   const box = document.getElementById('resp');
   box.className = 'rbox'; box.textContent = 'Guardando configuración...';
   const payload = {
-    flow_factor_1:       parseFloat(document.getElementById('ff1').value)      || 450,
-    flow_factor_2:       parseFloat(document.getElementById('ff2').value)      || 450,
-    tds_temperature:     parseFloat(document.getElementById('tds-t').value)    || 25,
-    pump_power_kw:       parseFloat(document.getElementById('pump-kw').value)  || 0.75,
+    flow_factor_1:            parseFloat(document.getElementById('ff1').value)        || 450,
+    flow_factor_2:            parseFloat(document.getElementById('ff2').value)        || 450,
+    tds_temperature:          parseFloat(document.getElementById('tds-t').value)      || 25,
+    min_flow_lpm:             parseFloat(document.getElementById('min-flow').value)   || 0.2,
+    flow_fault_delay_sec:     parseInt(document.getElementById('flow-delay').value)   || 30,
+    min_recovery_pct:         parseFloat(document.getElementById('min-rec').value)    || 10,
+    max_recovery_pct:         parseFloat(document.getElementById('max-rec').value)    || 85,
+    recovery_fault_delay_sec: parseInt(document.getElementById('rec-delay').value)    || 60,
+    pump_power_kw:            parseFloat(document.getElementById('pump-kw').value)    || 0.75,
     cost_kwh:            parseFloat(document.getElementById('cost-kwh').value) || 0.12,
     daily_target_liters: parseFloat(document.getElementById('daily-l').value)  || 0,
   };
@@ -4068,6 +4138,12 @@ def main():
 
     # Safe schema migrations (idempotent)
     db.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS notification_count INTEGER NOT NULL DEFAULT 0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS min_flow_lpm            FLOAT   DEFAULT 0.2")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS max_flow_lpm            FLOAT   DEFAULT 20.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS flow_fault_delay_sec    INTEGER DEFAULT 30")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS min_recovery_pct        FLOAT   DEFAULT 10.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS max_recovery_pct        FLOAT   DEFAULT 85.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS recovery_fault_delay_sec INTEGER DEFAULT 60")
     log.info("✅ Schema migrations aplicadas")
 
     api_thread = threading.Thread(target=_start_api, daemon=True)

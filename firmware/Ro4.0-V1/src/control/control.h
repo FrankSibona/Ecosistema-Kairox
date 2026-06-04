@@ -14,6 +14,20 @@ enum SystemState {
     FAULT
 };
 
+// ===================== FAULT REASON =====================
+// Identifies the cause of a FAULT transition.
+// MAX_RETRIES: startup sequence failed after MAX_RETRIES attempts.
+// FLOW_LOW:      permeate flow below min_flow_lpm for flow_fault_delay_sec.
+// RECOVERY_LOW:  water recovery below min_recovery_pct for recovery_fault_delay_sec.
+// RECOVERY_HIGH: water recovery above max_recovery_pct for recovery_fault_delay_sec.
+enum class FaultReason : uint8_t {
+    NONE          = 0,
+    MAX_RETRIES   = 1,
+    FLOW_LOW      = 2,
+    RECOVERY_LOW  = 3,
+    RECOVERY_HIGH = 4,
+};
+
 // ===================== OUTPUTS =====================
 struct OutputsState {
     bool pumpLow;
@@ -34,19 +48,29 @@ public:
     SystemState getState();
     const char* getStateName();
     int getRetryCount();
+    FaultReason getFaultReason();
+    const char* getFaultReasonName();
 
     OutputsState getOutputs();
 
 private:
-    SystemState state = IDLE;
+    SystemState state     = IDLE;
     SystemState lastState = IDLE;
 
     unsigned long stateStartTime = 0;
-    unsigned long retryTimer = 0;
-    int retryCount = 0;
+    unsigned long retryTimer     = 0;
+    int           retryCount     = 0;
+
+    // ── Process protection state ─────────────────────────────────────────────
+    FaultReason   faultReason          = FaultReason::NONE;
+    unsigned long flowFaultTimer       = 0;
+    bool          flowFaultArmed       = false;
+    unsigned long recoveryFaultTimer   = 0;
+    bool          recoveryFaultArmed   = false;
+    // ────────────────────────────────────────────────────────────────────────
 
     unsigned long demandaStart = 0;
-    unsigned long crudoStart = 0;
+    unsigned long crudoStart   = 0;
     unsigned long presionStart = 0;
 
     // 🔥 NUEVO: estado REAL de salidas

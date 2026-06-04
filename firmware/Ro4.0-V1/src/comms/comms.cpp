@@ -82,10 +82,16 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         // Missing fields fall back to current config — safe partial updates.
         SensorConfig cur = s_sensors->getConfig();
         SensorConfig incoming;
-        incoming.flow_factor_1   = doc["flow_factor_1"]   | cur.flow_factor_1;
-        incoming.flow_factor_2   = doc["flow_factor_2"]   | cur.flow_factor_2;
-        incoming.tds_temperature = doc["tds_temperature"] | cur.tds_temperature;
-        incoming.updated_at      = doc["updated_at"]      | (unsigned long)0;
+        incoming.flow_factor_1             = doc["flow_factor_1"]             | cur.flow_factor_1;
+        incoming.flow_factor_2             = doc["flow_factor_2"]             | cur.flow_factor_2;
+        incoming.tds_temperature           = doc["tds_temperature"]           | cur.tds_temperature;
+        incoming.min_flow_lpm              = doc["min_flow_lpm"]              | cur.min_flow_lpm;
+        incoming.max_flow_lpm              = doc["max_flow_lpm"]              | cur.max_flow_lpm;
+        incoming.flow_fault_delay_sec      = doc["flow_fault_delay_sec"]      | cur.flow_fault_delay_sec;
+        incoming.min_recovery_pct          = doc["min_recovery_pct"]          | cur.min_recovery_pct;
+        incoming.max_recovery_pct          = doc["max_recovery_pct"]          | cur.max_recovery_pct;
+        incoming.recovery_fault_delay_sec  = doc["recovery_fault_delay_sec"]  | cur.recovery_fault_delay_sec;
+        incoming.updated_at                = doc["updated_at"]                | (unsigned long)0;
 
         s_sensors->setConfig(incoming);
         return;
@@ -277,7 +283,8 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
             json += "\"ts\":" + String(ts) + ",";
             json += "\"state\":\"" + String(c.getStateName()) + "\",";
             json += "\"running\":" + String(c.isRunning()) + ",";
-            json += "\"retry\":" + String(c.getRetryCount());
+            json += "\"retry\":" + String(c.getRetryCount()) + ",";
+            json += "\"fault_reason\":\"" + String(c.getFaultReasonName()) + "\"";
             json += "}";
 
             mqttClient.publish(baseTopic("state").c_str(), json.c_str());
@@ -371,7 +378,8 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
         json += "\"ts\":" + String(ts) + ",";
         json += "\"state\":\"" + currentState + "\",";
         json += "\"running\":" + String(c.isRunning()) + ",";
-        json += "\"retry\":" + String(c.getRetryCount());
+        json += "\"retry\":" + String(c.getRetryCount()) + ",";
+        json += "\"fault_reason\":\"" + String(c.getFaultReasonName()) + "\"";
         json += "}";
 
         mqttClient.publish(baseTopic("state").c_str(), json.c_str());

@@ -90,6 +90,7 @@
 | `state_numeric` | ✅ Active | integer | 0–5 | FSM state as integer (for Grafana numeric panels) |
 | `running` | ✅ Active | boolean | — | True if high-pressure pump is active |
 | `retry` (FW) / `retry_count` (DB) | ✅ Active | integer | 0–MAX_RETRIES | Startup retry counter. Firmware sends `retry`, DB stores `retry_count`. |
+| `fault_reason` | ✅ Active | string | `""`, `MAX_RETRIES`, `FLOW_LOW`, `RECOVERY_LOW`, `RECOVERY_HIGH` | Cause of FAULT state. Empty string when not in FAULT. Published in `/state` MQTT topic. |
 
 ---
 
@@ -158,6 +159,12 @@
 | `daily_target_liters` | ✅ Active | float | L | Daily permeate production target |
 | `target_recovery` | ✅ Active | float | 0–1 | Target water recovery ratio |
 | `target_efficiency` | ✅ Active | float | 0–1 | Target membrane rejection efficiency |
+| `min_flow_lpm` | ✅ Active | float | L/min | Min permeate flow in PRODUCING. Below this for `flow_fault_delay_sec` → `FLOW_LOW` FAULT. Default: 0.2 |
+| `max_flow_lpm` | ✅ Active | float | L/min | Max permeate flow in PRODUCING (reserved, no active fault yet). Default: 20.0 |
+| `flow_fault_delay_sec` | ✅ Active | integer | s | Seconds flow must be out of range before FAULT triggers. Default: 30. Range: 5–300 |
+| `min_recovery_pct` | ✅ Active | float | % | Min water recovery `= flow_perm/(flow_perm+flow_reject)×100`. Below this for `recovery_fault_delay_sec` → `RECOVERY_LOW` FAULT. Default: 10 |
+| `max_recovery_pct` | ✅ Active | float | % | Max water recovery. Above this → `RECOVERY_HIGH` FAULT. Default: 85 |
+| `recovery_fault_delay_sec` | ✅ Active | integer | s | Seconds recovery must be out of range before FAULT triggers. Default: 60. Range: 5–300 |
 
 ---
 

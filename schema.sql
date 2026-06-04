@@ -173,10 +173,17 @@ CREATE TABLE IF NOT EXISTS device_config (
     target_recovery         FLOAT       DEFAULT 0.65,
     target_efficiency       FLOAT       DEFAULT 0.92,
     daily_target_liters     FLOAT       DEFAULT 0,       -- ← nuevo v3.3 (0 = sin objetivo)
-    -- ── SENSOR CALIBRATION (nuevo en v3.4) ───────────────────────────────────
+    -- ── SENSOR CALIBRATION ───────────────────────────────────────────────────
     flow_factor_1           FLOAT       DEFAULT 450.0,  -- pulsos/litro caudalímetro permeado
     flow_factor_2           FLOAT       DEFAULT 450.0,  -- pulsos/litro caudalímetro rechazo
     tds_temperature         FLOAT       DEFAULT 25.0,   -- °C para compensación temperatura TDS
+    -- ── PROCESS PROTECTIONS ──────────────────────────────────────────────────
+    min_flow_lpm            FLOAT       DEFAULT 0.2,    -- L/min mínimo en PRODUCING → FLOW_LOW
+    max_flow_lpm            FLOAT       DEFAULT 20.0,   -- L/min máximo en PRODUCING (reservado)
+    flow_fault_delay_sec    INTEGER     DEFAULT 30,     -- segundos fuera de rango antes de FAULT
+    min_recovery_pct        FLOAT       DEFAULT 10.0,   -- % recovery mínima → RECOVERY_LOW
+    max_recovery_pct        FLOAT       DEFAULT 85.0,   -- % recovery máxima → RECOVERY_HIGH
+    recovery_fault_delay_sec INTEGER    DEFAULT 60,     -- segundos fuera de rango antes de FAULT
     -- ─────────────────────────────────────────────────────────────────────────
     friendly_name           TEXT,
     location                TEXT,
