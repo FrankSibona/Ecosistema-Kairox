@@ -788,7 +788,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  tds_out_ppm AS \"TDS Salida\"\r\nFROM metrics\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\r\n  tds_out_ppm AS \"TDS Salida\"\r\nFROM telemetry_quality\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -871,7 +871,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  flow_permeate_lpm     AS \"Permeado\",\r\n  flow_reject_lpm  AS \"Rechazo\"\r\nFROM metrics\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\r\n  flow_permeate_lpm     AS \"Permeado\",\r\n  flow_reject_lpm  AS \"Rechazo\"\r\nFROM telemetry_process\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
