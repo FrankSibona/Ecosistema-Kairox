@@ -246,12 +246,12 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
             json += "\"device_id\":\"" + device_id + "\",";
             json += "\"fw_version\":\"" + String(fw_version) + "\",";
             json += "\"ts\":" + String(ts) + ",";
-            json += "\"flow_perm_lpm\":" + String(s.getFlow1()) + ",";
-            json += "\"flow_rechazo_lpm\":" + String(s.getFlow2()) + ",";
+            json += "\"flow_permeate_lpm\":" + String(s.getFlow1()) + ",";
+            json += "\"flow_reject_lpm\":" + String(s.getFlow2()) + ",";
             json += "\"pressure_membrane_bar\":" + String(s.getPressure1()) + ",";
             json += "\"pressure_brine_bar\":" + String(s.getPressure2()) + ",";
-            json += "\"volume_perm_l\":" + String(s.getTotalPerm()) + ",";
-            json += "\"volume_rechazo_l\":" + String(s.getTotalRech());
+            json += "\"volume_permeate_l\":" + String(s.getTotalPerm()) + ",";
+            json += "\"volume_reject_l\":" + String(s.getTotalRech());
             json += "}";
 
             mqttClient.publish(baseTopic("process").c_str(), json.c_str());
@@ -307,11 +307,11 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
             json += "\"device_id\":\"" + device_id + "\",";
             json += "\"ts\":" + String(ts) + ",";
             json += "\"demand\":" + String(s.getD1()) + ",";
-            json += "\"crudo_ok\":" + String(s.getD2()) + ",";
+            json += "\"raw_water_ok\":" + String(s.getD2()) + ",";
             json += "\"dose_ok\":" + String(s.getD3()) + ",";
-            json += "\"presostato\":" + String(s.getD4()) + ",";
-            json += "\"flotante_pozo\":" + String(s.getD5()) + ",";
-            json += "\"reserva2\":" + String(s.getD6());
+            json += "\"pressure_switch\":" + String(s.getD4()) + ",";
+            json += "\"feed_tank_level_low\":" + String(s.getD5()) + ",";
+            json += "\"spare2\":" + String(s.getD6());
             json += "}";
 
             mqttClient.publish(baseTopic("inputs").c_str(), json.c_str());
@@ -329,12 +329,12 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
         json += "\"fw_version\":\"" + String(fw_version) + "\",";
         json += "\"ts\":" + String(ts) + ",";
 
-        json += "\"flow_perm_lpm\":" + String(s.getFlow1()) + ",";
-        json += "\"flow_rechazo_lpm\":" + String(s.getFlow2()) + ",";
+        json += "\"flow_permeate_lpm\":" + String(s.getFlow1()) + ",";
+        json += "\"flow_reject_lpm\":" + String(s.getFlow2()) + ",";
         json += "\"pressure_membrane_bar\":" + String(s.getPressure1()) + ",";
         json += "\"pressure_brine_bar\":" + String(s.getPressure2()) + ",";
-        json += "\"volume_perm_l\":" + String(s.getTotalPerm()) + ",";
-        json += "\"volume_rechazo_l\":" + String(s.getTotalRech());
+        json += "\"volume_permeate_l\":" + String(s.getTotalPerm()) + ",";
+        json += "\"volume_reject_l\":" + String(s.getTotalRech());
 
         json += "}";
 
@@ -414,11 +414,11 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
         json += "\"device_id\":\"" + device_id + "\",";
         json += "\"ts\":" + String(ts) + ",";
         json += "\"demand\":" + String(s.getD1()) + ",";
-        json += "\"crudo_ok\":" + String(s.getD2()) + ",";
+        json += "\"raw_water_ok\":" + String(s.getD2()) + ",";
         json += "\"dose_ok\":" + String(s.getD3()) + ",";
-        json += "\"presostato\":" + String(s.getD4()) + ",";
-        json += "\"flotante_pozo\":" + String(s.getD5()) + ",";
-        json += "\"reserva2\":" + String(s.getD6());
+        json += "\"pressure_switch\":" + String(s.getD4()) + ",";
+        json += "\"feed_tank_level_low\":" + String(s.getD5()) + ",";
+        json += "\"spare2\":" + String(s.getD6());
         json += "}";
 
         mqttClient.publish(baseTopic("inputs").c_str(), json.c_str());
@@ -464,4 +464,3 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
             Serial.println("[CMD] ACK publish failed, retry next loop");
         }
     }
-}

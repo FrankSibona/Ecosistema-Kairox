@@ -39,8 +39,8 @@ THRESH_REMINDER_SEC           = int(os.getenv("THRESH_REMINDER_SEC",            
 SENSOR_LIMITS = {
     "pressure_membrane_bar": (-0.1, 50.0),
     "pressure_brine_bar":    (-0.1, 50.0),
-    "flow_perm_lpm":         (-0.1, 500.0),
-    "flow_rechazo_lpm":      (-0.1, 500.0),
+    "flow_permeate_lpm":         (-0.1, 500.0),
+    "flow_reject_lpm":      (-0.1, 500.0),
     "tds_in_ppm":            (-1.0, 5000.0),
     "tds_out_ppm":           (-1.0, 5000.0),
 }

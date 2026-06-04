@@ -22,7 +22,7 @@ NUEVO en v3.4 — Separación Telemetría vs KPIs:
 IMPACTO FUNCIONAL:
 
   Telemetría física persistente
-    → flow_perm_lpm y pressure_membrane ya NO desaparecen en IDLE
+    → flow_permeate_lpm y pressure_membrane_bar ya NO desaparecen en IDLE
     → El dashboard refleja variables reales incluso fuera de producción
     → Mejora directa en credibilidad del sistema
 
@@ -233,7 +233,7 @@ THRESHOLDS = {
     "efficiency_critical":        float(os.getenv("THRESH_EFF_CRITICAL",   "0.70")),
     "recovery_min":               float(os.getenv("THRESH_RECOVERY_MIN",   "0.25")),
     "recovery_max":               float(os.getenv("THRESH_RECOVERY_MAX",   "0.85")),
-    "flow_perm_min_lpm":          acfg.THRESH_MIN_FLOW,
+    "flow_permeate_min_lpm":          acfg.THRESH_MIN_FLOW,
     "alert_cooldown_sec":         int(os.getenv("ALERT_COOLDOWN",          "300")),
     "trend_window":               int(os.getenv("TREND_WINDOW",            "30")),
     "pressure_trend_threshold":   float(os.getenv("TREND_PRESSURE",        "0.02")),
@@ -256,7 +256,7 @@ THRESHOLDS = {
 BASELINE_FIELDS = [
     "efficiency_warn_low", "efficiency_crit_low",
     "recovery_warn_low",   "recovery_warn_high",
-    "flow_perm_warn_low",  "pressure_warn_high",
+    "flow_permeate_warn_low",  "pressure_warn_high",
     "pressure_crit_high",  "delta_pressure_warn_high",
 ]
 
@@ -410,7 +410,7 @@ class BaselineCache:
         "efficiency_crit_low":      "efficiency_critical",
         "recovery_warn_low":        "recovery_min",
         "recovery_warn_high":       "recovery_max",
-        "flow_perm_warn_low":       "flow_perm_min_lpm",
+        "flow_permeate_warn_low":       "flow_permeate_min_lpm",
         "pressure_warn_high":       "pressure_max_bar",
         "pressure_crit_high":       "pressure_max_bar",
         "delta_pressure_warn_high": "pressure_max_bar",
@@ -508,12 +508,12 @@ class KPIEngine:
         Estas son telemetría, no interpretación.
         """
         return {
-            "flow_perm_lpm":        validate_float(process.get("flow_perm_lpm"),          0, 100),
-            "flow_rechazo_lpm":     validate_float(process.get("flow_rechazo_lpm"),        0, 100),
+            "flow_permeate_lpm":        validate_float(process.get("flow_permeate_lpm"),          0, 100),
+            "flow_reject_lpm":     validate_float(process.get("flow_reject_lpm"),        0, 100),
             "pressure_membrane_bar": validate_float(process.get("pressure_membrane_bar"),  0, 50),
             "pressure_brine_bar":   validate_float(process.get("pressure_brine_bar"),      0, 50),
-            "volume_perm_l":        validate_float(process.get("volume_perm_l"),           0, 1e7),
-            "volume_rechazo_l":     validate_float(process.get("volume_rechazo_l"),        0, 1e7),
+            "volume_permeate_l":        validate_float(process.get("volume_permeate_l"),           0, 1e7),
+            "volume_reject_l":     validate_float(process.get("volume_reject_l"),        0, 1e7),
         }
 
     @classmethod
@@ -526,8 +526,8 @@ class KPIEngine:
         if state not in ACTIVE_STATES:
             return None
 
-        flow_p  = physical.get("flow_perm_lpm")
-        flow_r  = physical.get("flow_rechazo_lpm")
+        flow_p  = physical.get("flow_permeate_lpm")
+        flow_r  = physical.get("flow_reject_lpm")
         p_mem   = physical.get("pressure_membrane_bar")
         p_brine = physical.get("pressure_brine_bar")
 
@@ -558,8 +558,8 @@ class KPIEngine:
             "efficiency":         efficiency,
             "rejection_ratio":    rejection_ratio,
             "delta_pressure_bar": delta_p,
-            "flow_perm_lpm":      flow_p,
-            "flow_rechazo_lpm":   flow_r,
+            "flow_permeate_lpm":      flow_p,
+            "flow_reject_lpm":   flow_r,
             "tds_in_ppm":         tds_in,
             "tds_out_ppm":        tds_out,
             "cost_per_liter":     cost_per_liter,
@@ -586,8 +586,8 @@ class TrendAnalyzer:
             buf["pressure"].append(metrics["delta_pressure_bar"])
         if metrics.get("efficiency") is not None:
             buf["efficiency"].append(metrics["efficiency"])
-        if metrics.get("flow_perm_lpm") is not None:
-            buf["flow_perm"].append(metrics["flow_perm_lpm"])
+        if metrics.get("flow_permeate_lpm") is not None:
+            buf["flow_perm"].append(metrics["flow_permeate_lpm"])
 
     def slope(self, device_id: str, variable: str) -> Optional[float]:
         values = list(self._buffers[device_id][variable])
@@ -816,12 +816,12 @@ class BusinessMetricsEngine:
         rows = db.fetchall(
             f"""
             SELECT
-                MAX(volume_perm_l)    - MIN(volume_perm_l)    AS liters_produced,
-                MAX(volume_rechazo_l) - MIN(volume_rechazo_l) AS liters_rejected
+                MAX(volume_permeate_l)    - MIN(volume_permeate_l)    AS liters_produced,
+                MAX(volume_reject_l) - MIN(volume_reject_l) AS liters_rejected
             FROM telemetry_process
             WHERE device_id = %s
               AND DATE(time AT TIME ZONE '{tz_name}') = CURRENT_DATE AT TIME ZONE '{tz_name}'
-              AND volume_perm_l IS NOT NULL
+              AND volume_permeate_l IS NOT NULL
             """,
             (device_id,)
         )
@@ -1115,35 +1115,35 @@ class DiagnosticEngine:
         results = []
 
         if state == "FAULT":
-            crudo = (inputs or {}).get("crudo_ok", True)
+            crudo = (inputs or {}).get("raw_water_ok", True)
             retry = process.get("retry_count", 0)
             if not crudo:
                 results.append(DiagnosticResult(
                     "CRITICAL", "FAULT_NO_WATER",
                     "FALLA: Sin agua de crudo. El sistema no puede arrancar.",
                     "Verificar suministro de agua cruda, flotante del tanque y válvula de entrada.",
-                    {"state": state, "crudo_ok": False, "retry": retry},
+                    {"state": state, "raw_water_ok": False, "retry": retry},
                     score=DIAG_SCORES["FAULT_NO_WATER"], is_event=True,
                 ))
             else:
                 results.append(DiagnosticResult(
                     "CRITICAL", "FAULT_SYSTEM",
                     f"FALLA DEL SISTEMA: retries agotados ({retry}).",
-                    "Resetear equipo. Si persiste, inspeccionar bomba y presostato.",
+                    "Resetear equipo. Si persiste, inspeccionar bomba y pressure_switch.",
                     {"state": state, "retry": retry},
                     score=DIAG_SCORES["FAULT_SYSTEM"], is_event=True,
                 ))
 
-        elif inputs and not inputs.get("crudo_ok", True) and state not in ("IDLE", "FLUSHING"):
+        elif inputs and not inputs.get("raw_water_ok", True) and state not in ("IDLE", "FLUSHING"):
             results.append(DiagnosticResult(
                 "CRITICAL", "NO_RAW_WATER",
                 "Sin agua de crudo mientras el equipo intenta operar.",
                 "Verificar tanque de agua cruda y señal del flotante.",
-                {"crudo_ok": False, "state": state},
+                {"raw_water_ok": False, "state": state},
                 score=DIAG_SCORES["NO_RAW_WATER"], is_event=True,
             ))
 
-        flow_p = validate_float(process.get("flow_perm_lpm"), 0, 100)
+        flow_p = validate_float(process.get("flow_permeate_lpm"), 0, 100)
         if no_flow_tracker.update(device_id, state, flow_p):
             duration = no_flow_tracker.get_duration(device_id)
             p_mem    = validate_float(process.get("pressure_membrane_bar"), 0, 50)
@@ -1153,10 +1153,10 @@ class DiagnosticEngine:
                 "Verificar bomba de alta presión, válvula de permeado y membrana. "
                 "Revisar si hay aire atrapado en el sistema.",
                 {
-                    "flow_perm_lpm":    flow_p or 0,
+                    "flow_permeate_lpm":    flow_p or 0,
                     "state":            state,
                     "duration_sec":     round(duration, 0),
-                    "pressure_membrane": p_mem,
+                    "pressure_membrane_bar": p_mem,
                     "confidence_note":  "Verificar sensor de caudal antes de actuar",
                 },
                 score=DIAG_SCORES["NO_PERMEATE_FLOW"], is_event=True,
@@ -1167,7 +1167,7 @@ class DiagnosticEngine:
     def _eval_operational(self, metrics, process, thresh) -> List[DiagnosticResult]:
         results = []
         p_mem   = validate_float(process.get("pressure_membrane_bar"), 0, 50)
-        flow_p  = metrics.get("flow_perm_lpm")
+        flow_p  = metrics.get("flow_permeate_lpm")
         eff     = metrics.get("efficiency")
         rec     = metrics.get("recovery")
         delta_p = metrics.get("delta_pressure_bar")
@@ -1191,13 +1191,13 @@ class DiagnosticEngine:
             ))
 
         if (p_mem is not None and p_mem > thresh["pressure_warn_high"] * 0.85 and
-                flow_p is not None and flow_p < thresh["flow_perm_warn_low"]):
+                flow_p is not None and flow_p < thresh["flow_permeate_warn_low"]):
             extra = {"delta_pressure_bar": delta_p} if delta_p and delta_p > 1.5 else {}
             results.append(DiagnosticResult(
                 "WARNING", "MEMBRANE_FOULING",
                 f"Ensuciamiento de membrana: presión alta ({p_mem:.1f} bar) con bajo caudal ({flow_p:.2f} L/min).",
                 "Ejecutar ciclo de limpieza CIP. Si persiste, reemplazar membrana.",
-                {"pressure_membrane_bar": p_mem, "flow_perm_lpm": flow_p, **extra},
+                {"pressure_membrane_bar": p_mem, "flow_permeate_lpm": flow_p, **extra},
                 score=DIAG_SCORES["MEMBRANE_FOULING"],
             ))
 
@@ -1240,12 +1240,12 @@ class DiagnosticEngine:
                 score=DIAG_SCORES["LOW_EFFICIENCY"],
             ))
 
-        if flow_p is not None and flow_p < thresh["flow_perm_warn_low"]:
+        if flow_p is not None and flow_p < thresh["flow_permeate_warn_low"]:
             results.append(DiagnosticResult(
                 "WARNING", "LOW_PERMEATE_FLOW",
                 f"Caudal de permeado bajo: {flow_p:.2f} L/min.",
                 "Verificar presión de entrada y estado de membrana.",
-                {"flow_perm_lpm": flow_p},
+                {"flow_permeate_lpm": flow_p},
                 score=DIAG_SCORES["LOW_PERMEATE_FLOW"],
             ))
 
@@ -1277,8 +1277,8 @@ class DiagnosticEngine:
         checks = {
             "pressure_membrane_bar": process.get("pressure_membrane_bar"),
             "pressure_brine_bar":    process.get("pressure_brine_bar"),
-            "flow_perm_lpm":         process.get("flow_perm_lpm"),
-            "flow_rechazo_lpm":      process.get("flow_rechazo_lpm"),
+            "flow_permeate_lpm":         process.get("flow_permeate_lpm"),
+            "flow_reject_lpm":      process.get("flow_reject_lpm"),
         }
         if metrics:
             checks["tds_in_ppm"]  = metrics.get("tds_in_ppm")
@@ -1811,7 +1811,7 @@ class LearnEngine:
 
         eff_m, eff_s = stats("efficiency")
         rec_m, rec_s = stats("recovery")
-        fp_m,  fp_s  = stats("flow_perm_lpm")
+        fp_m,  fp_s  = stats("flow_permeate_lpm")
         dp_m,  dp_s  = stats("delta_pressure_bar")
 
         def w_high(m, s, mult=2): return (m + mult * s) if m is not None and s else None
@@ -1828,13 +1828,13 @@ class LearnEngine:
                 learned_at = NOW(), session_id = %s,
                 efficiency_mean = %s, efficiency_std = %s,
                 recovery_mean = %s, recovery_std = %s,
-                flow_perm_mean = %s, flow_perm_std = %s,
+                flow_permeate_mean = %s, flow_permeate_std = %s,
                 delta_pressure_mean = %s, delta_pressure_std = %s,
                 efficiency_warn_low_learned = %s,
                 efficiency_crit_low_learned = %s,
                 recovery_warn_low_learned = %s,
                 recovery_warn_high_learned = %s,
-                flow_perm_warn_low_learned = %s,
+                flow_permeate_warn_low_learned = %s,
                 pressure_warn_high_learned = %s,
                 pressure_crit_high_learned = %s,
                 delta_pressure_warn_high_learned = %s
@@ -1911,20 +1911,37 @@ class MessageProcessor:
             (device_id, fw_version)
         )
 
+    # PHASE1_COMPAT: translate old firmware field names → new names.
+    # Remove after all devices have been reflashed with firmware v2.0+.
+    _PROCESS_ALIASES = {
+        "flow_perm_lpm":   "flow_permeate_lpm",
+        "flow_rechazo_lpm": "flow_reject_lpm",
+        "volume_perm_l":   "volume_permeate_l",
+        "volume_rechazo_l": "volume_reject_l",
+    }
+    _INPUTS_ALIASES = {
+        "crudo_ok":   "raw_water_ok",
+        "presostato": "pressure_switch",
+        "reserva1":          "feed_tank_level_low",
+        "flotante_pozo":       "feed_tank_level_low",
+        "reserva2":   "spare2",
+    }
+
     def _handle_process(self, device_id, timestamp, data):
+        data = {self._PROCESS_ALIASES.get(k, k): v for k, v in data.items()}
         db.execute(
             "INSERT INTO telemetry_process "
-            "(time,device_id,flow_perm_lpm,flow_rechazo_lpm,pressure_membrane_bar,"
-            "pressure_brine_bar,volume_perm_l,volume_rechazo_l,fw_version) "
+            "(time,device_id,flow_permeate_lpm,flow_reject_lpm,pressure_membrane_bar,"
+            "pressure_brine_bar,volume_permeate_l,volume_reject_l,fw_version) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
                 timestamp, device_id,
-                validate_float(data.get("flow_perm_lpm"),          0, 100),
-                validate_float(data.get("flow_rechazo_lpm"),        0, 100),
+                validate_float(data.get("flow_permeate_lpm"),          0, 100),
+                validate_float(data.get("flow_reject_lpm"),        0, 100),
                 validate_float(data.get("pressure_membrane_bar"),   0, 50),
                 validate_float(data.get("pressure_brine_bar"),      0, 50),
-                validate_float(data.get("volume_perm_l"),           0, 1e7),
-                validate_float(data.get("volume_rechazo_l"),        0, 1e7),
+                validate_float(data.get("volume_permeate_l"),           0, 1e7),
+                validate_float(data.get("volume_reject_l"),        0, 1e7),
                 data.get("fw_version", ""),
             ),
         )
@@ -1964,11 +1981,12 @@ class MessageProcessor:
             self._run_analytics(device_id, timestamp, tracker.get_process(device_id) or {})
 
     def _handle_inputs(self, device_id, timestamp, data):
+        data = {self._INPUTS_ALIASES.get(k, k): v for k, v in data.items()}
         inputs = {k: validate_bool(data.get(k))
-                  for k in ("demand","crudo_ok","dose_ok","presostato","reserva1","reserva2")}
+                  for k in ("demand","raw_water_ok","dose_ok","pressure_switch","feed_tank_level_low","spare2")}
         db.execute(
             "INSERT INTO telemetry_inputs "
-            "(time,device_id,demand,crudo_ok,dose_ok,presostato,reserva1,reserva2) "
+            "(time,device_id,demand,raw_water_ok,dose_ok,pressure_switch,feed_tank_level_low,spare2) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
             (timestamp, device_id, *inputs.values()),
         )
@@ -2027,12 +2045,12 @@ class MessageProcessor:
             db.execute(
                 "INSERT INTO metrics "
                 "(time,device_id,recovery,efficiency,rejection_ratio,delta_pressure_bar,"
-                "flow_perm_lpm,flow_rechazo_lpm,tds_in_ppm,tds_out_ppm,cost_per_liter) "
+                "flow_permeate_lpm,flow_reject_lpm,tds_in_ppm,tds_out_ppm,cost_per_liter) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (timestamp, device_id,
                  metrics["recovery"],        metrics["efficiency"],
                  metrics["rejection_ratio"], metrics["delta_pressure_bar"],
-                 metrics["flow_perm_lpm"],   metrics["flow_rechazo_lpm"],
+                 metrics["flow_permeate_lpm"],   metrics["flow_reject_lpm"],
                  metrics["tds_in_ppm"],      metrics["tds_out_ppm"],
                  metrics["cost_per_liter"]),
             )
@@ -2094,7 +2112,7 @@ class MessageProcessor:
                 INSERT INTO device_status
                 (device_id, last_seen, online, state,
                 last_severity, last_diag_code, last_diag_message, last_action,
-                flow_perm_lpm, pressure_membrane, recovery, efficiency,
+                flow_permeate_lpm, pressure_membrane_bar, recovery, efficiency,
                 health_status, health_code, health_message,
                 health_action, health_updated_at,
                 biz_liters_today, biz_target_liters, biz_fulfillment_pct,
@@ -2113,8 +2131,8 @@ class MessageProcessor:
                 last_diag_code     = EXCLUDED.last_diag_code,
                 last_diag_message  = EXCLUDED.last_diag_message,
                 last_action        = EXCLUDED.last_action,
-                flow_perm_lpm      = EXCLUDED.flow_perm_lpm,
-                pressure_membrane  = EXCLUDED.pressure_membrane,
+                flow_permeate_lpm      = EXCLUDED.flow_permeate_lpm,
+                pressure_membrane_bar  = EXCLUDED.pressure_membrane_bar,
                 recovery           = EXCLUDED.recovery,
                 efficiency         = EXCLUDED.efficiency,
                 health_status      = EXCLUDED.health_status,
@@ -2144,7 +2162,7 @@ class MessageProcessor:
                     final_root.action,
 
                     # 🔹 SOLO variables físicas válidas
-                    physical.get("flow_perm_lpm"),
+                    physical.get("flow_permeate_lpm"),
                     physical.get("pressure_membrane_bar"),
 
                     metrics["recovery"]   if metrics else None,
@@ -2176,7 +2194,7 @@ class MessageProcessor:
                 INSERT INTO device_status
                 (device_id, last_seen, online, state,
                 last_severity, last_diag_code, last_diag_message, last_action,
-                flow_perm_lpm, pressure_membrane, recovery, efficiency,
+                flow_permeate_lpm, pressure_membrane_bar, recovery, efficiency,
                 biz_health_age_hours)
                 VALUES (%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (device_id) DO UPDATE SET
@@ -2187,8 +2205,8 @@ class MessageProcessor:
                 last_diag_code    = EXCLUDED.last_diag_code,
                 last_diag_message = EXCLUDED.last_diag_message,
                 last_action       = EXCLUDED.last_action,
-                flow_perm_lpm     = EXCLUDED.flow_perm_lpm,
-                pressure_membrane = EXCLUDED.pressure_membrane,
+                flow_permeate_lpm     = EXCLUDED.flow_permeate_lpm,
+                pressure_membrane_bar = EXCLUDED.pressure_membrane_bar,
                 recovery          = EXCLUDED.recovery,
                 efficiency        = EXCLUDED.efficiency,
                 biz_health_age_hours = EXCLUDED.biz_health_age_hours
@@ -2203,7 +2221,7 @@ class MessageProcessor:
                     final_root.action,
 
                     # 🔹 SOLO físicas
-                    physical.get("flow_perm_lpm"),
+                    physical.get("flow_permeate_lpm"),
                     physical.get("pressure_membrane_bar"),
 
                     metrics["recovery"]   if metrics else None,
@@ -2769,7 +2787,7 @@ def get_baseline(device_id):
     cols += ["learned_at", "session_id",
              "efficiency_mean", "efficiency_std",
              "recovery_mean", "recovery_std",
-             "flow_perm_mean", "flow_perm_std",
+             "flow_permeate_mean", "flow_permeate_std",
              "delta_pressure_mean", "delta_pressure_std"]
 
     rows = db.fetchall(
@@ -2799,7 +2817,7 @@ def get_baseline(device_id):
             "learned_at":          str(row[offset]),     "session_id":      row[offset+1],
             "efficiency_mean":     row[offset+2],         "efficiency_std":  row[offset+3],
             "recovery_mean":       row[offset+4],         "recovery_std":    row[offset+5],
-            "flow_perm_mean":      row[offset+6],         "flow_perm_std":   row[offset+7],
+            "flow_permeate_mean":      row[offset+6],         "flow_permeate_std":   row[offset+7],
             "delta_pressure_mean": row[offset+8],         "delta_pressure_std": row[offset+9],
         }
     else:
@@ -2900,7 +2918,7 @@ def get_status(device_id):
     rows = db.fetchall(
         """
         SELECT state, last_severity, last_diag_code, last_diag_message, last_action,
-               flow_perm_lpm, pressure_membrane, recovery, efficiency,
+               flow_permeate_lpm, pressure_membrane_bar, recovery, efficiency,
                last_seen, online,
                health_status, health_code, health_message, health_action, health_updated_at,
                biz_liters_today, biz_target_liters, biz_fulfillment_pct,
@@ -2935,7 +2953,7 @@ def get_status(device_id):
     return jsonify({
         "state": r[0],         "last_severity": r[1],
         "diag_code": r[2],     "diag_message": r[3],   "diag_action": r[4],
-        "flow_perm_lpm": r[5], "pressure": r[6],
+        "flow_permeate_lpm": r[5], "pressure": r[6],
         "recovery": r[7],      "efficiency": r[8],
         "last_seen": str(last_seen_dt) if last_seen_dt else None,
         "online": online,
@@ -3109,7 +3127,7 @@ def get_device_context(device_id):
       raw.process       — latest sensor values (flows, pressures, volumes)
       raw.process_window — recent telemetry history (chronological)
       raw.quality       — TDS raw values
-      raw.inputs        — digital input states (demand, crudo_ok, etc.)
+      raw.inputs        — digital input states (demand, raw_water_ok, etc.)
       raw.outputs       — relay/valve states
       raw.state_history — last 5 FSM transitions
       commands          — active command + last 5 in history with details
@@ -3164,8 +3182,8 @@ def get_device_context(device_id):
     }
 
     proc = db.fetchall(
-        "SELECT time, flow_perm_lpm, flow_rechazo_lpm, pressure_membrane_bar, "
-        "       pressure_brine_bar, volume_perm_l, volume_rechazo_l, fw_version "
+        "SELECT time, flow_permeate_lpm, flow_reject_lpm, pressure_membrane_bar, "
+        "       pressure_brine_bar, volume_permeate_l, volume_reject_l, fw_version "
         "FROM telemetry_process WHERE device_id = %s ORDER BY time DESC LIMIT 1",
         (device_id,)
     )
@@ -3174,15 +3192,15 @@ def get_device_context(device_id):
         r = proc[0]
         process_latest = {
             "sampled_at_utc":        r[0].isoformat(),
-            "flow_perm_lpm":         r[1], "flow_rechazo_lpm":      r[2],
+            "flow_permeate_lpm":         r[1], "flow_reject_lpm":      r[2],
             "pressure_membrane_bar": r[3], "pressure_brine_bar":    r[4],
-            "volume_perm_l":         r[5], "volume_rechazo_l":      r[6],
+            "volume_permeate_l":         r[5], "volume_reject_l":      r[6],
             "fw_version":            r[7],
         }
 
     wrows = db.fetchall(
-        "SELECT time, flow_perm_lpm, flow_rechazo_lpm, pressure_membrane_bar, "
-        "       pressure_brine_bar, volume_perm_l, volume_rechazo_l "
+        "SELECT time, flow_permeate_lpm, flow_reject_lpm, pressure_membrane_bar, "
+        "       pressure_brine_bar, volume_permeate_l, volume_reject_l "
         "FROM telemetry_process WHERE device_id = %s "
         "ORDER BY time DESC LIMIT %s",
         (device_id, window)
@@ -3190,9 +3208,9 @@ def get_device_context(device_id):
     process_window = [
         {
             "ts_utc":                r[0].isoformat(),
-            "flow_perm_lpm":         r[1], "flow_rechazo_lpm":      r[2],
+            "flow_permeate_lpm":         r[1], "flow_reject_lpm":      r[2],
             "pressure_membrane_bar": r[3], "pressure_brine_bar":    r[4],
-            "volume_perm_l":         r[5], "volume_rechazo_l":      r[6],
+            "volume_permeate_l":         r[5], "volume_reject_l":      r[6],
         }
         for r in reversed(wrows)
     ]
@@ -3214,7 +3232,7 @@ def get_device_context(device_id):
         }
 
     irow = db.fetchall(
-        "SELECT time, demand, crudo_ok, dose_ok, presostato, reserva1, reserva2 "
+        "SELECT time, demand, raw_water_ok, dose_ok, pressure_switch, feed_tank_level_low, spare2 "
         "FROM telemetry_inputs WHERE device_id = %s ORDER BY time DESC LIMIT 1",
         (device_id,)
     )
@@ -3222,9 +3240,9 @@ def get_device_context(device_id):
     if irow:
         inputs = {
             "sampled_at_utc": irow[0][0].isoformat(),
-            "demand":   irow[0][1], "crudo_ok":   irow[0][2],
-            "dose_ok":  irow[0][3], "presostato": irow[0][4],
-            "reserva1": irow[0][5], "reserva2":   irow[0][6],
+            "demand":   irow[0][1], "raw_water_ok":   irow[0][2],
+            "dose_ok":  irow[0][3], "pressure_switch": irow[0][4],
+            "feed_tank_level_low": irow[0][5], "spare2":   irow[0][6],
         }
 
     orow = db.fetchall(

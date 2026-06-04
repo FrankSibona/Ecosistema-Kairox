@@ -12,12 +12,12 @@
 CREATE TABLE IF NOT EXISTS telemetry_process (
     time                    TIMESTAMPTZ     NOT NULL,
     device_id               TEXT            NOT NULL,
-    flow_perm_lpm           FLOAT,
-    flow_rechazo_lpm        FLOAT,
+    flow_permeate_lpm           FLOAT,
+    flow_reject_lpm        FLOAT,
     pressure_membrane_bar   FLOAT,
     pressure_brine_bar      FLOAT,
-    volume_perm_l           FLOAT,
-    volume_rechazo_l        FLOAT,
+    volume_permeate_l           FLOAT,
+    volume_reject_l        FLOAT,
     fw_version              TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_process_device_time
@@ -50,11 +50,11 @@ CREATE TABLE IF NOT EXISTS telemetry_inputs (
     time        TIMESTAMPTZ     NOT NULL,
     device_id   TEXT            NOT NULL,
     demand      BOOLEAN,
-    crudo_ok    BOOLEAN,
+    raw_water_ok    BOOLEAN,
     dose_ok     BOOLEAN,
-    presostato  BOOLEAN,
-    reserva1    BOOLEAN,
-    reserva2    BOOLEAN
+    pressure_switch  BOOLEAN,
+    feed_tank_level_low    BOOLEAN,
+    spare2    BOOLEAN
 );
 CREATE INDEX IF NOT EXISTS idx_inputs_device_time
     ON telemetry_inputs (device_id, time DESC);
@@ -79,8 +79,8 @@ CREATE TABLE IF NOT EXISTS metrics (
     efficiency          FLOAT,
     rejection_ratio     FLOAT,
     delta_pressure_bar  FLOAT,
-    flow_perm_lpm       FLOAT,
-    flow_rechazo_lpm    FLOAT,
+    flow_permeate_lpm       FLOAT,
+    flow_reject_lpm    FLOAT,
     tds_in_ppm          FLOAT,
     tds_out_ppm         FLOAT,
     cost_per_liter      FLOAT
@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS device_status (
     last_action             TEXT,
 
     -- Lecturas de proceso
-    flow_perm_lpm           FLOAT,
+    flow_permeate_lpm           FLOAT,
     pressure_membrane       FLOAT,
     recovery                FLOAT,
     efficiency              FLOAT,
@@ -204,8 +204,8 @@ CREATE TABLE IF NOT EXISTS device_baseline (
     efficiency_std          FLOAT,
     recovery_mean           FLOAT,
     recovery_std            FLOAT,
-    flow_perm_mean          FLOAT,
-    flow_perm_std           FLOAT,
+    flow_permeate_mean          FLOAT,
+    flow_permeate_std           FLOAT,
     delta_pressure_mean     FLOAT,
     delta_pressure_std      FLOAT,
 
@@ -221,9 +221,9 @@ CREATE TABLE IF NOT EXISTS device_baseline (
     recovery_warn_high_learned      FLOAT,
     recovery_warn_high_manual       FLOAT,
     recovery_warn_high_source       TEXT    DEFAULT 'learned',
-    flow_perm_warn_low_learned      FLOAT,
-    flow_perm_warn_low_manual       FLOAT,
-    flow_perm_warn_low_source       TEXT    DEFAULT 'learned',
+    flow_permeate_warn_low_learned      FLOAT,
+    flow_permeate_warn_low_manual       FLOAT,
+    flow_permeate_warn_low_source       TEXT    DEFAULT 'learned',
     pressure_warn_high_learned      FLOAT,
     pressure_warn_high_manual       FLOAT,
     pressure_warn_high_source       TEXT    DEFAULT 'learned',
@@ -275,17 +275,17 @@ CREATE OR REPLACE VIEW daily_production AS
 SELECT
     device_id,
     DATE(time AT TIME ZONE 'America/Argentina/Buenos_Aires') AS day,
-    MAX(volume_perm_l)    - MIN(volume_perm_l)               AS liters_produced,
-    MAX(volume_rechazo_l) - MIN(volume_rechazo_l)            AS liters_rejected,
+    MAX(volume_permeate_l)    - MIN(volume_permeate_l)               AS liters_produced,
+    MAX(volume_reject_l) - MIN(volume_reject_l)            AS liters_rejected,
     ROUND(CAST(
-        (MAX(volume_perm_l) - MIN(volume_perm_l)) /
+        (MAX(volume_permeate_l) - MIN(volume_permeate_l)) /
         NULLIF(
-            (MAX(volume_perm_l)    - MIN(volume_perm_l)) +
-            (MAX(volume_rechazo_l) - MIN(volume_rechazo_l)),
+            (MAX(volume_permeate_l)    - MIN(volume_permeate_l)) +
+            (MAX(volume_reject_l) - MIN(volume_reject_l)),
         0) * 100
     AS numeric), 1) AS recovery_pct
 FROM telemetry_process
-WHERE volume_perm_l IS NOT NULL
+WHERE volume_permeate_l IS NOT NULL
 GROUP BY device_id, DATE(time AT TIME ZONE 'America/Argentina/Buenos_Aires')
 ORDER BY day DESC;
 

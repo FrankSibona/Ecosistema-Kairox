@@ -73,9 +73,9 @@ def _build_telemetry_window(
 
     proc_rows = db.fetchall(
         """
-        SELECT time, flow_perm_lpm, flow_rechazo_lpm,
+        SELECT time, flow_permeate_lpm, flow_reject_lpm,
                pressure_membrane_bar, pressure_brine_bar,
-               volume_perm_l, volume_rechazo_l
+               volume_permeate_l, volume_reject_l
         FROM telemetry_process
         WHERE device_id = %s
           AND time > NOW() - MAKE_INTERVAL(secs => %s)
@@ -159,13 +159,13 @@ def _build_telemetry_window(
 
         samples.append({
             "ts":                    ts.isoformat(),
-            "flow_perm_lpm":         flow_p,
-            "flow_rechazo_lpm":      flow_r,
+            "flow_permeate_lpm":         flow_p,
+            "flow_reject_lpm":      flow_r,
             "pressure_in_bar":       p_in,
             "pressure_out_bar":      p_brine,
             "pressure_membrane_bar": p_diff,
-            "volume_perm_l":         r[5],
-            "volume_rechazo_l":      r[6],
+            "volume_permeate_l":         r[5],
+            "volume_reject_l":      r[6],
             "tds_in_voltage":        tds_in_v,
             "tds_out_voltage":       tds_out_v,
             "tds_in_ppm":            tds_in_ppm,

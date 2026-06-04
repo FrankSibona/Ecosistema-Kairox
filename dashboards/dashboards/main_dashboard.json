@@ -788,7 +788,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  tds_out_raw AS \"TDS Salida\"\r\nFROM metrics\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\r\n  tds_out_ppm AS \"TDS Salida\"\r\nFROM metrics\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -871,7 +871,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  flow_perm_lpm     AS \"Permeado\",\r\n  flow_rechazo_lpm  AS \"Rechazo\"\r\nFROM metrics\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\r\n  flow_permeate_lpm     AS \"Permeado\",\r\n  flow_reject_lpm  AS \"Rechazo\"\r\nFROM metrics\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -958,7 +958,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  MAX(volume_perm_l) - MIN(volume_perm_l) AS \"Litros hoy\"\nFROM telemetry_process\nWHERE device_id = '$device'\n  AND time >= date_trunc('day', NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires');",
+          "rawSql": "SELECT\n  MAX(volume_permeate_l) - MIN(volume_permeate_l) AS \"Litros hoy\"\nFROM telemetry_process\nWHERE device_id = '$device'\n  AND time >= date_trunc('day', NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires');",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1541,7 +1541,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  MAX(volume_rechazo_l) - MIN(volume_rechazo_l) AS \"Litros desperdiciados\"\r\nFROM telemetry_process\r\nWHERE device_id = '$device'\r\n  AND time >= date_trunc('day', NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires');",
+          "rawSql": "SELECT\r\n  MAX(volume_reject_l) - MIN(volume_reject_l) AS \"Litros desperdiciados\"\r\nFROM telemetry_process\r\nWHERE device_id = '$device'\r\n  AND time >= date_trunc('day', NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires');",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1829,7 +1829,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  demand      AS \"Demanda\",\r\n  crudo_ok    AS \"Agua cruda\",\r\n  dose_ok     AS \"Dosificación\",\r\n  presostato  AS \"Presostato\",\r\n  reserva1    AS \"Reserva 1\",\r\n  reserva2    AS \"Reserva 2\"\r\nFROM telemetry_inputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\r\n  demand      AS \"Demanda\",\r\n  raw_water_ok    AS \"Agua cruda\",\r\n  dose_ok     AS \"Dosificación\",\r\n  pressure_switch  AS \"Presostato\",\r\n  spare1    AS \"Reserva 1\",\r\n  spare2    AS \"Reserva 2\"\r\nFROM telemetry_inputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
