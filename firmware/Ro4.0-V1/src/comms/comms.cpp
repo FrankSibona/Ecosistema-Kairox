@@ -151,6 +151,40 @@ String baseTopic(String sub) {
     return "fyntek/" + device_id + "/" + sub;
 }
 
+// ── I/O publish helpers ───────────────────────────────────────────────────────
+// Single source of truth for /outputs and /inputs payloads.
+// Called from both on-change detection and periodic heartbeat so the two
+// paths can never diverge when fields are added or renamed.
+
+static void publishOutputs(Control& c, long ts) {
+    OutputsState out = c.getOutputs();
+    String json = "{";
+    json += "\"device_id\":\"" + device_id + "\",";
+    json += "\"ts\":" + String(ts) + ",";
+    json += "\"pump_low\":"    + String(out.pumpLow)    + ",";
+    json += "\"pump_high\":"   + String(out.pumpHigh)   + ",";
+    json += "\"pump_inlet\":"  + String(out.pumpInlet)  + ",";
+    json += "\"pump_dose\":"   + String(out.pumpDose)   + ",";
+    json += "\"valve_flush\":" + String(out.valveFlush) + ",";
+    json += "\"valve_inlet\":" + String(out.valveInlet);
+    json += "}";
+    mqttClient.publish(baseTopic("outputs").c_str(), json.c_str());
+}
+
+static void publishInputs(Sensors& s, long ts) {
+    String json = "{";
+    json += "\"device_id\":\"" + device_id + "\",";
+    json += "\"ts\":" + String(ts) + ",";
+    json += "\"demand\":"              + String(s.getD1()) + ",";
+    json += "\"raw_water_ok\":"        + String(s.getD2()) + ",";
+    json += "\"dose_ok\":"             + String(s.getD3()) + ",";
+    json += "\"pressure_switch\":"     + String(s.getD4()) + ",";
+    json += "\"feed_tank_level_low\":" + String(s.getD5()) + ",";
+    json += "\"spare2\":"              + String(s.getD6());
+    json += "}";
+    mqttClient.publish(baseTopic("inputs").c_str(), json.c_str());
+}
+
 // ================= WIFI =================
 
 void setupWiFi() {
@@ -291,38 +325,10 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
         }
 
         // ===== OUTPUTS =====
-        {
-            OutputsState out = c.getOutputs();
-
-            String json = "{";
-            json += "\"device_id\":\"" + device_id + "\",";
-            json += "\"ts\":" + String(ts) + ",";
-            json += "\"pump_low\":" + String(out.pumpLow) + ",";
-            json += "\"pump_high\":" + String(out.pumpHigh) + ",";
-            json += "\"pump_inlet\":" + String(out.pumpInlet) + ",";
-            json += "\"pump_dose\":" + String(out.pumpDose) + ",";
-            json += "\"valve_flush\":" + String(out.valveFlush) + ",";
-            json += "\"valve_inlet\":" + String(out.valveInlet);
-            json += "}";
-
-            mqttClient.publish(baseTopic("outputs").c_str(), json.c_str());
-        }
+        publishOutputs(c, ts);
 
         // ===== INPUTS =====
-        {
-            String json = "{";
-            json += "\"device_id\":\"" + device_id + "\",";
-            json += "\"ts\":" + String(ts) + ",";
-            json += "\"demand\":" + String(s.getD1()) + ",";
-            json += "\"raw_water_ok\":" + String(s.getD2()) + ",";
-            json += "\"dose_ok\":" + String(s.getD3()) + ",";
-            json += "\"pressure_switch\":" + String(s.getD4()) + ",";
-            json += "\"feed_tank_level_low\":" + String(s.getD5()) + ",";
-            json += "\"spare2\":" + String(s.getD6());
-            json += "}";
-
-            mqttClient.publish(baseTopic("inputs").c_str(), json.c_str());
-        }
+        publishInputs(s, ts);
     }
 
 
@@ -391,21 +397,8 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
     OutputsState out = c.getOutputs();
 
     if (memcmp(&out, &lastOut, sizeof(out)) != 0) {
-
         lastOut = out;
-
-        String json = "{";
-        json += "\"device_id\":\"" + device_id + "\",";
-        json += "\"ts\":" + String(ts) + ",";
-        json += "\"pump_low\":" + String(out.pumpLow) + ",";
-        json += "\"pump_high\":" + String(out.pumpHigh) + ",";
-        json += "\"pump_inlet\":" + String(out.pumpInlet) + ",";
-        json += "\"pump_dose\":" + String(out.pumpDose) + ",";
-        json += "\"valve_flush\":" + String(out.valveFlush) + ",";
-        json += "\"valve_inlet\":" + String(out.valveInlet);
-        json += "}";
-
-        mqttClient.publish(baseTopic("outputs").c_str(), json.c_str());
+        publishOutputs(c, ts);
     }
 
     // ================= INPUTS =================
@@ -415,36 +408,34 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
                     String(s.getD4()) + String(s.getD5()) + String(s.getD6());
 
     if (inputs != lastInputs) {
-
         lastInputs = inputs;
-
-        String json = "{";
-        json += "\"device_id\":\"" + device_id + "\",";
-        json += "\"ts\":" + String(ts) + ",";
-        json += "\"demand\":" + String(s.getD1()) + ",";
-        json += "\"raw_water_ok\":" + String(s.getD2()) + ",";
-        json += "\"dose_ok\":" + String(s.getD3()) + ",";
-        json += "\"pressure_switch\":" + String(s.getD4()) + ",";
-        json += "\"feed_tank_level_low\":" + String(s.getD5()) + ",";
-        json += "\"spare2\":" + String(s.getD6());
-        json += "}";
-
-        mqttClient.publish(baseTopic("inputs").c_str(), json.c_str());
+        publishInputs(s, ts);
     }
 
-    // ================= HEARTBEAT =================
-    if (now - lastHeartbeat > 30000) {
+    // ================= HEARTBEAT + I/O SYNC (every 10s) =================
+    // Three publications share the same timer so they are always aligned:
+    //   1. /heartbeat  — connectivity + FSM state (backend uses for last_seen)
+    //   2. /outputs    — real relay state (guards against QoS-0 message loss)
+    //   3. /inputs     — real digital input state (same reason)
+    // The on-change logic above remains the primary path for real-time updates.
+    // This block guarantees convergence within 10s regardless of packet loss.
+    if (now - lastHeartbeat >= 10000) {
 
         lastHeartbeat = now;
 
-        String json = "{";
-        json += "\"device_id\":\"" + device_id + "\",";
-        json += "\"ts\":" + String(ts) + ",";
-        json += "\"status\":\"online\",";
-        json += "\"state\":\"" + String(c.getStateName()) + "\"";
-        json += "}";
+        // -- connectivity / FSM state --
+        {
+            String json = "{";
+            json += "\"device_id\":\"" + device_id + "\",";
+            json += "\"ts\":" + String(ts) + ",";
+            json += "\"status\":\"online\",";
+            json += "\"state\":\"" + String(c.getStateName()) + "\"";
+            json += "}";
+            mqttClient.publish(baseTopic("heartbeat").c_str(), json.c_str());
+        }
 
-        mqttClient.publish(baseTopic("heartbeat").c_str(), json.c_str());
+        publishOutputs(c, ts);
+        publishInputs(s, ts);
     }
 
     // ================= CMD ACK =================
