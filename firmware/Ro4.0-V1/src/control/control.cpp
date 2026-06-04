@@ -299,7 +299,7 @@ void Control::update(Sensors &s, Commands &cmds) {
             break;
     }
 
-    if (retryCount >= MAX_RETRIES && state != FAULT) {
+    if (retryCount >= FSM_MAX_RETRIES && state != FAULT) {
         faultReason = FaultReason::MAX_RETRIES;
         state = FAULT;
     }

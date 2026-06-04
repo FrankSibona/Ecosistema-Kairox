@@ -472,3 +472,4 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
             Serial.println("[CMD] ACK publish failed, retry next loop");
         }
     }
+}

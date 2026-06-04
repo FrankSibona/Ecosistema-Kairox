@@ -57,7 +57,7 @@
 #define LOW_PUMP_FILL_TIME   10000
 #define PRESSURE_CHECK_TIME   5000
 #define RETRY_DELAY          10000
-#define MAX_RETRIES              5
+#define FSM_MAX_RETRIES          5
 
 #define FLUSH_START_TIME     10000
 #define FLUSH_STOP_TIME      10000
