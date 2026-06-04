@@ -146,9 +146,12 @@ void Control::update(Sensors &s, Commands &cmds) {
             stopAll();
 
             if (demandaOK && crudoOK) {
-                Serial.println("[EVENT] Demanda detectada -> arranque");
-                state = STARTING;
-                stateStartTime = millis();
+                bool retryWaiting = retryCount > 0 && (millis() - retryTimer < RETRY_DELAY);
+                if (!retryWaiting) {
+                    Serial.println("[EVENT] Demanda detectada -> arranque");
+                    state = STARTING;
+                    stateStartTime = millis();
+                }
             }
             break;
 
@@ -215,10 +218,6 @@ void Control::update(Sensors &s, Commands &cmds) {
 
     if (retryCount >= MAX_RETRIES) {
         state = FAULT;
-    }
-
-    if (retryCount > 0 && millis() - retryTimer < RETRY_DELAY) {
-        return;
     }
 
     // ===== BOMBA DE POZO — control directo, independiente del FSM =====
