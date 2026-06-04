@@ -1829,7 +1829,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  demand      AS \"Demanda\",\r\n  raw_water_ok    AS \"Agua cruda\",\r\n  dose_ok     AS \"Dosificación\",\r\n  pressure_switch  AS \"Presostato\",\r\n  spare1    AS \"Reserva 1\",\r\n  spare2    AS \"Reserva 2\"\r\nFROM telemetry_inputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\r\n  demand      AS \"Demanda\",\r\n  raw_water_ok    AS \"Agua cruda\",\r\n  dose_ok     AS \"Dosificación\",\r\n  pressure_switch  AS \"Presostato\",\r\n  feed_tank_level_low    AS \"Reserva 1\",\r\n  spare2    AS \"Reserva 2\"\r\nFROM telemetry_inputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
