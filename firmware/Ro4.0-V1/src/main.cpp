@@ -3,11 +3,15 @@
 #include "control/control.h"
 #include "comms/comms.h"
 #include "commands/commands.h"
+#include "diag/diag_mode.h"
+#include "diag/flight_recorder.h"
 
-Sensors  sensors;
-Control  control;
-Comms    comms;
-Commands commands;
+Sensors       sensors;
+Control       control;
+Comms         comms;
+Commands      commands;
+DiagMode      diagMode;
+FlightRecorder flightRec;
 
 void setup() {
     Serial.begin(115200);
@@ -15,7 +19,7 @@ void setup() {
     sensors.begin();
     control.begin();
     commands.begin();
-    comms.begin(commands, sensors);
+    comms.begin(commands, sensors, diagMode, flightRec);
 
     Serial.println("=== SYSTEM START ===");
 }
@@ -29,7 +33,7 @@ void loop() {
     control.update(sensors, commands);
 
     // 3. Comunicaciones — procesa callbacks MQTT y publica ACK pendiente
-    comms.update(sensors, control, commands);
+    comms.update(sensors, control, commands, diagMode, flightRec);
 
     // 4. Debug liviano
     static unsigned long lastDebug = 0;

@@ -298,6 +298,8 @@ void Sensors::update() {
         pulsesQ2 = 0;
         interrupts();
 
+        last_pulses1 = p1;
+        last_pulses2 = p2;
         flow1 = (p1 * 60.0f) / _cfg.flow_factor_1;
         flow2 = (p2 * 60.0f) / _cfg.flow_factor_2;
 
@@ -317,8 +319,10 @@ void Sensors::update() {
 
     // ── Pressure (EWMA α=0.3) ─────────────────────────────────────────────────
     const float alpha = 0.3f;
-    float p1_raw = (analogRead(PIN_AIN0) / 4095.0f) * 10.0f;
-    float p2_raw = (analogRead(PIN_AIN1) / 4095.0f) * 10.0f;
+    p1_adc = analogRead(PIN_AIN0);
+    p2_adc = analogRead(PIN_AIN1);
+    float p1_raw = (p1_adc / 4095.0f) * 10.0f;
+    float p2_raw = (p2_adc / 4095.0f) * 10.0f;
     if (p1_f == 0) p1_f = p1_raw;
     if (p2_f == 0) p2_f = p2_raw;
     p1_f = alpha * p1_raw + (1.0f - alpha) * p1_f;
@@ -367,6 +371,10 @@ int   Sensors::getTDS1AdcRaw()  { return tds1_adc_raw; }
 int   Sensors::getTDS2AdcRaw()  { return tds2_adc_raw; }
 int   Sensors::getTDS1MvRaw()   { return tds1_mv_raw; }
 int   Sensors::getTDS2MvRaw()   { return tds2_mv_raw; }
+int   Sensors::getPressure1Adc()        { return p1_adc; }
+int   Sensors::getPressure2Adc()        { return p2_adc; }
+unsigned long Sensors::getLastPulses1() { return last_pulses1; }
+unsigned long Sensors::getLastPulses2() { return last_pulses2; }
 float Sensors::getTotalPerm()   { return totalPerm; }
 float Sensors::getTotalRech()   { return totalRech; }
 

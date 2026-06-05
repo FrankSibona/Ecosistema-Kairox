@@ -53,6 +53,15 @@ public:
 
     OutputsState getOutputs();
 
+    // ── Diagnostic / Flight Recorder getters ────────────────────────────────
+    // consumeFaultEvent(): returns true exactly once after a FAULT transition,
+    // then resets to false. Used by comms to trigger flight recorder publish.
+    bool          consumeFaultEvent();
+    bool          isFlowFaultArmed()         const;
+    bool          isRecoveryFaultArmed()     const;
+    unsigned long getFlowFaultElapsedMs()    const; // 0 when not armed
+    unsigned long getRecoveryFaultElapsedMs() const;
+
 private:
     SystemState state     = IDLE;
     SystemState lastState = IDLE;
@@ -68,6 +77,10 @@ private:
     unsigned long recoveryFaultTimer   = 0;
     bool          recoveryFaultArmed   = false;
     // ────────────────────────────────────────────────────────────────────────
+
+    // Set to true for exactly one loop iteration when FSM first enters FAULT.
+    // consumeFaultEvent() reads and clears it atomically.
+    bool          _justFaulted         = false;
 
     unsigned long demandaStart = 0;
     unsigned long crudoStart   = 0;

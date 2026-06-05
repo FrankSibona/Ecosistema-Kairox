@@ -7,12 +7,13 @@
 class Sensors;
 class Control;
 class Commands;
+class DiagMode;
+class FlightRecorder;
 
 class Comms {
 public:
-    // sensors is stored for config delivery from mqttCallback.
-    void begin(Commands &cmds, Sensors &s);
-    void update(Sensors &s, Control &c, Commands &cmds);
+    void begin(Commands &cmds, Sensors &s, DiagMode &diag, FlightRecorder &fr);
+    void update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, FlightRecorder &fr);
 
 private:
     bool sendSnapshot = false;

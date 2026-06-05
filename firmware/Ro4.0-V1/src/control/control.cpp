@@ -31,6 +31,23 @@ FaultReason Control::getFaultReason() {
     return faultReason;
 }
 
+bool Control::consumeFaultEvent() {
+    bool v = _justFaulted;
+    _justFaulted = false;
+    return v;
+}
+
+bool Control::isFlowFaultArmed()     const { return flowFaultArmed; }
+bool Control::isRecoveryFaultArmed() const { return recoveryFaultArmed; }
+
+unsigned long Control::getFlowFaultElapsedMs() const {
+    return flowFaultArmed ? (millis() - flowFaultTimer) : 0UL;
+}
+
+unsigned long Control::getRecoveryFaultElapsedMs() const {
+    return recoveryFaultArmed ? (millis() - recoveryFaultTimer) : 0UL;
+}
+
 const char* Control::getFaultReasonName() {
     switch (faultReason) {
         case FaultReason::MAX_RETRIES:   return "MAX_RETRIES";
@@ -310,6 +327,10 @@ void Control::update(Sensors &s, Commands &cmds) {
     bool nivelBajo = s.getNivelBajoPozo();
     outputs.pumpInlet = nivelBajo;
     digitalWrite(PIN_R3, nivelBajo);
+
+    // Fire the fault event flag for exactly one iteration when FSM enters FAULT.
+    // lastState still holds the pre-switch value here — updated next iteration.
+    _justFaulted = (state == FAULT && lastState != FAULT);
 }
 
 // ================= COMMAND VALIDATION =================

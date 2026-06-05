@@ -58,6 +58,14 @@ public:
     float getTotalPerm();
     float getTotalRech();
 
+    // Pressure ADC raw counts (0–4095) — for flight recorder and diagnostic
+    int   getPressure1Adc();
+    int   getPressure2Adc();
+
+    // Pulse counts from the last completed 1 s flow window
+    unsigned long getLastPulses1();
+    unsigned long getLastPulses2();
+
     // ── Digital inputs ───────────────────────────────────────────────────────
     bool getD1();
     bool getD2();
@@ -126,6 +134,8 @@ private:
 
     // Pressure EWMA
     float p1_f = 0, p2_f = 0;
+    int   p1_adc = 0, p2_adc = 0;          // raw ADC counts for pressure channels
+    unsigned long last_pulses1 = 0, last_pulses2 = 0;  // pulses in last 1 s window
 
     // TDS: 5-sample circular median buffer (stores voltage)
     static constexpr int TDS_BUF = 5;

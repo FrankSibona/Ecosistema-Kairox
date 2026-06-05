@@ -9,6 +9,8 @@
 #include "../sensors/sensors.h"
 #include "../control/control.h"
 #include "../commands/commands.h"
+#include "../diag/diag_mode.h"
+#include "../diag/flight_recorder.h"
 #include <config.h>
 
 // ================= DEVICE ID =================
@@ -19,8 +21,10 @@ String device_id;
 
 // ================= COMMAND CALLBACK =================
 
-static Commands* s_cmds    = nullptr;
-static Sensors*  s_sensors = nullptr;
+static Commands*       s_cmds      = nullptr;
+static Sensors*        s_sensors   = nullptr;
+static DiagMode*       s_diag      = nullptr;
+static FlightRecorder* s_flightrec = nullptr;
 
 // Maps ReceiveResult to a human-readable string for field logs.
 // ACCEPTED(0) DUPLICATE(1) BUSY(2) INVALID_JSON(3) UNKNOWN_COMMAND(4)
@@ -94,6 +98,32 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         incoming.updated_at                = doc["updated_at"]                | (unsigned long)0;
 
         s_sensors->setConfig(incoming);
+        return;
+    }
+
+    // ── /diag/ctrl ───────────────────────────────────────────────────────────
+    char diag_topic[72];
+    snprintf(diag_topic, sizeof(diag_topic), "fyntek/%s/diag/ctrl", device_id.c_str());
+    if (strcmp(topic, diag_topic) == 0) {
+        if (!s_diag) return;
+        StaticJsonDocument<64> doc;
+        if (deserializeJson(doc, payload, length)) return;
+        if (doc["enable"] | false) {
+            uint32_t dur = doc["duration_sec"] | 300U;
+            s_diag->activate(dur);
+            Serial.printf("[DIAG] Activado %us\n", dur);
+        } else {
+            s_diag->deactivate();
+            Serial.println("[DIAG] Desactivado");
+        }
+        return;
+    }
+
+    // ── /diag/flightrec/get ──────────────────────────────────────────────────
+    char fr_topic[80];
+    snprintf(fr_topic, sizeof(fr_topic), "fyntek/%s/diag/flightrec/get", device_id.c_str());
+    if (strcmp(topic, fr_topic) == 0) {
+        if (s_flightrec) s_flightrec->startDump();
         return;
     }
 }
@@ -221,6 +251,8 @@ void Comms::reconnect() {
         mqttClient.subscribe(baseTopic("cmd").c_str());
         mqttClient.subscribe(baseTopic("config").c_str());
         mqttClient.subscribe(baseTopic("config/reset").c_str());
+        mqttClient.subscribe(baseTopic("diag/ctrl").c_str());
+        mqttClient.subscribe(baseTopic("diag/flightrec/get").c_str());
 
         // 🔥 SNAPSHOT REAL
         sendSnapshot = true;
@@ -232,7 +264,7 @@ void Comms::reconnect() {
 
 // ================= INIT =================
 
-void Comms::begin(Commands &cmds, Sensors &s) {
+void Comms::begin(Commands &cmds, Sensors &s, DiagMode &diag, FlightRecorder &fr) {
 
     Serial.println("[COMMS] Init");
 
@@ -243,15 +275,54 @@ void Comms::begin(Commands &cmds, Sensors &s) {
 
     setupWiFi();
 
-    s_cmds    = &cmds;
-    s_sensors = &s;
+    s_cmds      = &cmds;
+    s_sensors   = &s;
+    s_diag      = &diag;
+    s_flightrec = &fr;
     mqttClient.setServer(mqtt_server, mqtt_port);
+    mqttClient.setBufferSize(4096);
     mqttClient.setCallback(mqttCallback);
 }
 
 // ================= UPDATE =================
 
-void Comms::update(Sensors &s, Control &c, Commands &cmds) {
+// ── Diagnostic 1 Hz publish ───────────────────────────────────────────────────
+// Called only when DiagMode is active. Publishes full sensor/FSM/protection
+// snapshot to fyntek/{id}/diag. Uses stack-static buffer — no heap allocation.
+static void publishDiag(Sensors& s, Control& c, DiagMode& diag, long ts) {
+    static char buf[1024];
+    const DiagTransitions& tr = diag.getTransitions();
+    snprintf(buf, sizeof(buf),
+        "{\"device_id\":\"%s\",\"ts\":%ld,"
+        "\"state\":\"%s\",\"fault_reason\":%u,\"retry\":%d,"
+        "\"flow1\":%.2f,\"flow2\":%.2f,"
+        "\"p1_bar\":%.2f,\"p2_bar\":%.2f,\"p1_adc\":%d,\"p2_adc\":%d,"
+        "\"tds1_ppm\":%.1f,\"tds2_ppm\":%.1f,"
+        "\"tds1_mv\":%d,\"tds2_mv\":%d,\"tds1_raw\":%d,\"tds2_raw\":%d,"
+        "\"d1\":%u,\"d2\":%u,\"d3\":%u,\"d4\":%u,\"d5\":%u,\"d6\":%u,"
+        "\"flow_fault_armed\":%u,\"flow_fault_ms\":%lu,"
+        "\"rec_fault_armed\":%u,\"rec_fault_ms\":%lu,"
+        "\"diag_rem_sec\":%u,"
+        "\"tr_d1\":%u,\"tr_d2\":%u,\"tr_d3\":%u,"
+        "\"tr_d4\":%u,\"tr_d5\":%u,\"tr_d6\":%u,"
+        "\"rssi\":%d}",
+        device_id.c_str(), ts,
+        c.getStateName(), (uint8_t)c.getFaultReason(), c.getRetryCount(),
+        s.getFlow1(), s.getFlow2(),
+        s.getPressure1(), s.getPressure2(), s.getPressure1Adc(), s.getPressure2Adc(),
+        s.getTDS1Ppm(), s.getTDS2Ppm(),
+        s.getTDS1MvRaw(), s.getTDS2MvRaw(), s.getTDS1AdcRaw(), s.getTDS2AdcRaw(),
+        (uint8_t)s.getD1(), (uint8_t)s.getD2(), (uint8_t)s.getD3(),
+        (uint8_t)s.getD4(), (uint8_t)s.getD5(), (uint8_t)s.getD6(),
+        (uint8_t)c.isFlowFaultArmed(), c.getFlowFaultElapsedMs(),
+        (uint8_t)c.isRecoveryFaultArmed(), c.getRecoveryFaultElapsedMs(),
+        diag.remainingSec(),
+        tr.d[0], tr.d[1], tr.d[2], tr.d[3], tr.d[4], tr.d[5],
+        (int)WiFi.RSSI());
+    mqttClient.publish((String("fyntek/") + device_id + "/diag").c_str(), buf);
+}
+
+void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, FlightRecorder &fr) {
 
     unsigned long now = millis();
 
@@ -468,5 +539,82 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
         } else {
             Serial.println("[CMD] ACK publish failed, retry next loop");
         }
+    }
+
+    // ================= FLIGHT RECORDER — 1 Hz sample =================
+    static unsigned long lastFrSample = 0;
+    if (now - lastFrSample >= 1000) {
+        lastFrSample = now;
+
+        uint8_t in_byte =
+            (s.getD1() ? 0x01 : 0) | (s.getD2() ? 0x02 : 0) |
+            (s.getD3() ? 0x04 : 0) | (s.getD4() ? 0x08 : 0) |
+            (s.getD5() ? 0x10 : 0) | (s.getD6() ? 0x20 : 0);
+        OutputsState fout = c.getOutputs();
+        uint8_t out_byte =
+            (fout.pumpLow    ? 0x01 : 0) | (fout.pumpHigh   ? 0x02 : 0) |
+            (fout.pumpInlet  ? 0x04 : 0) | (fout.pumpDose   ? 0x08 : 0) |
+            (fout.valveFlush ? 0x10 : 0) | (fout.valveInlet ? 0x20 : 0);
+        uint8_t flags_byte =
+            (diag.isActive()           ? 0x01 : 0) |
+            (c.isFlowFaultArmed()      ? 0x02 : 0) |
+            (c.isRecoveryFaultArmed()  ? 0x04 : 0);
+
+        FlightRecord rec;
+        rec.ts           = (uint32_t)ts;
+        rec.state        = (uint8_t)c.getState();
+        rec.fault_reason = (uint8_t)c.getFaultReason();
+        rec.retry_count  = (uint8_t)c.getRetryCount();
+        rec.flags        = flags_byte;
+        rec.flow1_lpm    = s.getFlow1();
+        rec.flow2_lpm    = s.getFlow2();
+        rec.p1_adc       = (int16_t)s.getPressure1Adc();
+        rec.p2_adc       = (int16_t)s.getPressure2Adc();
+        rec.p1_bar       = s.getPressure1();
+        rec.p2_bar       = s.getPressure2();
+        rec.tds1_raw     = (int16_t)s.getTDS1AdcRaw();
+        rec.tds2_raw     = (int16_t)s.getTDS2AdcRaw();
+        rec.tds1_mv      = (int16_t)s.getTDS1MvRaw();
+        rec.tds2_mv      = (int16_t)s.getTDS2MvRaw();
+        rec.inputs       = in_byte;
+        rec.outputs      = out_byte;
+        rec.rssi         = (int8_t)WiFi.RSSI();
+        rec._pad         = 0;
+        fr.record(rec);
+    }
+
+    // ================= FAULT EVENT =================
+    // consumeFaultEvent() returns true exactly once per FAULT transition.
+    // captureFault() marks the buffer; publishFaultEvent() sends it immediately.
+    if (c.consumeFaultEvent()) {
+        fr.captureFault((uint8_t)c.getFaultReason(), (uint32_t)ts);
+    }
+    if (fr.hasPendingFaultEvent()) {
+        fr.publishFaultEvent(mqttClient, device_id);
+    }
+
+    // ================= DIAG EXPIRY =================
+    if (diag.hasExpired()) {
+        diag.deactivate();
+        Serial.println("[DIAG] Auto-expirado");
+    }
+
+    // ================= DIAG TRANSITIONS =================
+    // Always polled so counters are accurate regardless of publish rate.
+    diag.updateInputs(s.getD1(), s.getD2(), s.getD3(),
+                      s.getD4(), s.getD5(), s.getD6());
+
+    // ================= DIAG PUBLISH (1 Hz, only when active) =================
+    static unsigned long lastDiagPub = 0;
+    if (diag.isActive() && now - lastDiagPub >= 1000) {
+        lastDiagPub = now;
+        publishDiag(s, c, diag, ts);
+    }
+
+    // ================= FLIGHT RECORDER DUMP (one chunk per 500 ms) =================
+    static unsigned long lastDumpChunk = 0;
+    if (fr.isDumping() && now - lastDumpChunk >= 500) {
+        lastDumpChunk = now;
+        fr.publishNextChunk(mqttClient, device_id);
     }
 }
