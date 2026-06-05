@@ -46,6 +46,15 @@ public:
     float getTDS1Ppm();       // ppm, temperature-compensated
     float getTDS2Ppm();
 
+    // Debug instrumentation — raw ADC values before filtering.
+    // adc_raw: 12-bit count (0–4095) from analogRead().
+    // mv_raw:  millivolts from analogReadMilliVolts() before /1000 conversion.
+    // Remove after TDS ADC investigation is complete.
+    int   getTDS1AdcRaw();
+    int   getTDS2AdcRaw();
+    int   getTDS1MvRaw();
+    int   getTDS2MvRaw();
+
     float getTotalPerm();
     float getTotalRech();
 
@@ -84,6 +93,10 @@ private:
     float p1 = 0,    p2 = 0;
     float tds1_v = 0, tds2_v = 0;   // filtered voltage (V)
     float tds1_ppm = 0, tds2_ppm = 0;
+
+    // Debug — single latest raw sample (updated every loop iteration).
+    int   tds1_adc_raw = 0, tds2_adc_raw = 0;  // 12-bit counts
+    int   tds1_mv_raw  = 0, tds2_mv_raw  = 0;  // analogReadMilliVolts (pre /1000)
 
     float totalPerm = 0, totalRech = 0;
     float lastSavedPerm = 0, lastSavedRech = 0;

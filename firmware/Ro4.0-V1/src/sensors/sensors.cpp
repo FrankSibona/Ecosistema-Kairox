@@ -225,8 +225,12 @@ void Sensors::begin() {
     loadConfig();
 
     // Warm TDS buffers with a real reading to avoid transient zeros at boot.
-    float v1 = analogReadMilliVolts(PIN_TDS1) / 1000.0f;
-    float v2 = analogReadMilliVolts(PIN_TDS2) / 1000.0f;
+    tds1_adc_raw = analogRead(PIN_TDS1);
+    tds2_adc_raw = analogRead(PIN_TDS2);
+    tds1_mv_raw  = analogReadMilliVolts(PIN_TDS1);
+    tds2_mv_raw  = analogReadMilliVolts(PIN_TDS2);
+    float v1 = tds1_mv_raw / 1000.0f;
+    float v2 = tds2_mv_raw / 1000.0f;
     for (int i = 0; i < TDS_BUF; i++) { tds1_buf[i] = v1; tds2_buf[i] = v2; }
     tds1_v   = v1;   tds2_v   = v2;
     tds1_ppm = voltageToPpm(v1, _cfg.tds_temperature);
@@ -288,14 +292,28 @@ void Sensors::update() {
     // analogReadMilliVolts() uses ESP32 factory ADC calibration (better than
     // raw/4095 * VREF which ignores ADC non-linearity).
     // Buffer stores voltages; ppm is computed once on the median voltage.
-    tds1_buf[tds_idx] = analogReadMilliVolts(PIN_TDS1) / 1000.0f;
-    tds2_buf[tds_idx] = analogReadMilliVolts(PIN_TDS2) / 1000.0f;
+    tds1_adc_raw      = analogRead(PIN_TDS1);
+    tds2_adc_raw      = analogRead(PIN_TDS2);
+    tds1_mv_raw       = analogReadMilliVolts(PIN_TDS1);
+    tds2_mv_raw       = analogReadMilliVolts(PIN_TDS2);
+    tds1_buf[tds_idx] = tds1_mv_raw / 1000.0f;
+    tds2_buf[tds_idx] = tds2_mv_raw / 1000.0f;
     tds_idx = (tds_idx + 1) % TDS_BUF;
 
     tds1_v   = median5(tds1_buf);
     tds2_v   = median5(tds2_buf);
     tds1_ppm = voltageToPpm(tds1_v, _cfg.tds_temperature);
     tds2_ppm = voltageToPpm(tds2_v, _cfg.tds_temperature);
+
+    // Debug — rate-limited to 1 Hz. Remove after TDS investigation.
+    static unsigned long lastTdsLog = 0;
+    if (millis() - lastTdsLog >= 1000) {
+        lastTdsLog = millis();
+        Serial.printf("[TDS] ch1: raw=%4d mv=%4d v=%.4f ppm=%.1f | "
+                                 "ch2: raw=%4d mv=%4d v=%.4f ppm=%.1f\n",
+                      tds1_adc_raw, tds1_mv_raw, tds1_v, tds1_ppm,
+                      tds2_adc_raw, tds2_mv_raw, tds2_v, tds2_ppm);
+    }
 }
 
 // ── Getters ───────────────────────────────────────────────────────────────────
@@ -307,6 +325,10 @@ float Sensors::getTDS1Voltage() { return tds1_v; }
 float Sensors::getTDS2Voltage() { return tds2_v; }
 float Sensors::getTDS1Ppm()     { return tds1_ppm; }
 float Sensors::getTDS2Ppm()     { return tds2_ppm; }
+int   Sensors::getTDS1AdcRaw()  { return tds1_adc_raw; }
+int   Sensors::getTDS2AdcRaw()  { return tds2_adc_raw; }
+int   Sensors::getTDS1MvRaw()   { return tds1_mv_raw; }
+int   Sensors::getTDS2MvRaw()   { return tds2_mv_raw; }
 float Sensors::getTotalPerm()   { return totalPerm; }
 float Sensors::getTotalRech()   { return totalRech; }
 

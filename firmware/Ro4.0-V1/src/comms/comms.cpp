@@ -299,14 +299,17 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
 
         // ===== QUALITY =====
         {
-            char json[256];
+            char json[384];
             snprintf(json, sizeof(json),
                 "{\"device_id\":\"%s\",\"fw_version\":\"%s\",\"ts\":%ld,"
                 "\"tds_in_voltage\":%.4f,\"tds_in_ppm\":%.1f,"
-                "\"tds_out_voltage\":%.4f,\"tds_out_ppm\":%.1f}",
+                "\"tds_out_voltage\":%.4f,\"tds_out_ppm\":%.1f,"
+                "\"adc1_raw\":%d,\"adc2_raw\":%d,\"adc1_mv\":%d,\"adc2_mv\":%d}",
                 device_id.c_str(), fw_version, ts,
                 s.getTDS1Voltage(), s.getTDS1Ppm(),
-                s.getTDS2Voltage(), s.getTDS2Ppm());
+                s.getTDS2Voltage(), s.getTDS2Ppm(),
+                s.getTDS1AdcRaw(), s.getTDS2AdcRaw(),
+                s.getTDS1MvRaw(), s.getTDS2MvRaw());
             mqttClient.publish(baseTopic("quality").c_str(), json);
         }
 
@@ -359,14 +362,17 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds) {
 
         lastQuality = now;
 
-        char json[256];
+        char json[384];
         snprintf(json, sizeof(json),
             "{\"device_id\":\"%s\",\"fw_version\":\"%s\",\"ts\":%ld,"
             "\"tds_in_voltage\":%.4f,\"tds_in_ppm\":%.1f,"
-            "\"tds_out_voltage\":%.4f,\"tds_out_ppm\":%.1f}",
+            "\"tds_out_voltage\":%.4f,\"tds_out_ppm\":%.1f,"
+            "\"adc1_raw\":%d,\"adc2_raw\":%d,\"adc1_mv\":%d,\"adc2_mv\":%d}",
             device_id.c_str(), fw_version, ts,
             s.getTDS1Voltage(), s.getTDS1Ppm(),
-            s.getTDS2Voltage(), s.getTDS2Ppm());
+            s.getTDS2Voltage(), s.getTDS2Ppm(),
+            s.getTDS1AdcRaw(), s.getTDS2AdcRaw(),
+            s.getTDS1MvRaw(), s.getTDS2MvRaw());
         mqttClient.publish(baseTopic("quality").c_str(), json);
     }
 
