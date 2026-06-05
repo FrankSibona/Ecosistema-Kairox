@@ -235,6 +235,44 @@ void Sensors::begin() {
     tds1_v   = v1;   tds2_v   = v2;
     tds1_ppm = voltageToPpm(v1, _cfg.tds_temperature);
     tds2_ppm = voltageToPpm(v2, _cfg.tds_temperature);
+
+    // ── ADC burst diagnostic — 100 samples, min/max/avg. Remove after investigation.
+    // Note: analogRead() and analogReadMilliVolts() perform SEPARATE conversions —
+    // they do not share a sample. esp_adc_cal returns ~142mV for raw=0 (curve intercept).
+    // ADC_11db floor: voltages below ~150mV produce raw=0 regardless of actual voltage.
+    // Expected raw scale (3100mV full scale): 70mV≈92  142mV≈188  280mV≈370
+    {
+        const int N = 100;
+        long  s1r = 0, s1m = 0, s2r = 0, s2m = 0;
+        int mn1r = 4095, mx1r = 0, mn1m = 99999, mx1m = 0;
+        int mn2r = 4095, mx2r = 0, mn2m = 99999, mx2m = 0;
+
+        for (int i = 0; i < N; i++) {
+            int r1 = analogRead(PIN_TDS1);
+            int m1 = analogReadMilliVolts(PIN_TDS1);
+            int r2 = analogRead(PIN_TDS2);
+            int m2 = analogReadMilliVolts(PIN_TDS2);
+
+            s1r += r1;  if (r1 < mn1r) mn1r = r1;  if (r1 > mx1r) mx1r = r1;
+            s1m += m1;  if (m1 < mn1m) mn1m = m1;  if (m1 > mx1m) mx1m = m1;
+            s2r += r2;  if (r2 < mn2r) mn2r = r2;  if (r2 > mx2r) mx2r = r2;
+            s2m += m2;  if (m2 < mn2m) mn2m = m2;  if (m2 > mx2m) mx2m = m2;
+
+            delay(1);
+        }
+
+        Serial.println("[ADC_DIAG] ========================================");
+        Serial.printf ("[ADC_DIAG] Atten: ADC_11db  Res: 12-bit  N=%d samples\n", N);
+        Serial.printf ("[ADC_DIAG] Scale: 3100mV/4095cnt  "
+                       "70mV~=92raw  142mV~=188raw  280mV~=370raw\n");
+        Serial.printf ("[ADC_DIAG] GPIO%d TDS1  raw: avg=%4ld min=%4d max=%4d  "
+                       "mv: avg=%4ld min=%4d max=%4d\n",
+                       PIN_TDS1, s1r/N, mn1r, mx1r, s1m/N, mn1m, mx1m);
+        Serial.printf ("[ADC_DIAG] GPIO%d TDS2  raw: avg=%4ld min=%4d max=%4d  "
+                       "mv: avg=%4ld min=%4d max=%4d\n",
+                       PIN_TDS2, s2r/N, mn2r, mx2r, s2m/N, mn2m, mx2m);
+        Serial.println("[ADC_DIAG] ========================================");
+    }
 }
 
 // ── Update (called every loop iteration) ─────────────────────────────────────
