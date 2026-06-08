@@ -13,6 +13,10 @@ services:
       - DB_USER=user
       - DB_PASS=password
       - MQTT_BROKER=ro-mosquitto
+      - AI_REALTIME_ENDPOINT_URL=https://kairox.ergosys.com.ar/decide
+      - AI_REALTIME_TIMEOUT_SEC=2
+      - AI_REALTIME_CONTEXT_SECONDS=0
+      - AI_REALTIME_API_TOKEN=kariox-ergo-2026-api
     ports:
       - "8080:8080"
     depends_on:

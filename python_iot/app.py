@@ -111,6 +111,7 @@ import queue
 import smtplib
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -205,6 +206,12 @@ AI_AUTO_COOLDOWN_SEC = max(0,   int(os.getenv("AI_AUTO_COOLDOWN_SEC",  "300"))) 
 AI_WINDOW_SECONDS    = max(10,  int(os.getenv("AI_WINDOW_SECONDS",     "60")))   # window depth
 AI_SAMPLE_PERIOD_SEC = max(1,   int(os.getenv("AI_SAMPLE_PERIOD_SEC",  "1")))    # seconds between samples
 AI_WINDOW_MAX_SAMPLES= max(1,   int(os.getenv("AI_WINDOW_MAX_SAMPLES", "120")))  # hard cap on samples
+# Realtime mode — per-sample push to a separate endpoint
+AI_REALTIME_ENDPOINT_URL    = os.getenv("AI_REALTIME_ENDPOINT_URL", "")
+AI_REALTIME_TIMEOUT_SEC     = max(1, int(os.getenv("AI_REALTIME_TIMEOUT_SEC",     "2")))
+AI_REALTIME_CONTEXT_SECONDS = max(0, int(os.getenv("AI_REALTIME_CONTEXT_SECONDS", "0")))
+AI_REALTIME_API_TOKEN       = os.getenv("AI_REALTIME_API_TOKEN", "")
+AI_API_TOKEN                = os.getenv("AI_API_TOKEN", "")
 
 # ── Admin Panel ───────────────────────────────────────────────────────────────
 # HTTP Basic Auth for /admin/* routes.
@@ -1343,16 +1350,28 @@ diagnostic_engine = DiagnosticEngine()
 
 class DeviceStateTracker:
     def __init__(self):
-        self._state:   Dict[str, str]  = defaultdict(lambda: "UNKNOWN")
-        self._inputs:  Dict[str, Dict] = {}
-        self._process: Dict[str, Dict] = {}
+        self._state:        Dict[str, str]          = defaultdict(lambda: "UNKNOWN")
+        self._inputs:       Dict[str, Dict]          = {}
+        self._outputs:      Dict[str, Dict]          = {}
+        self._process:      Dict[str, Dict]          = {}
+        self._fault_reason: Dict[str, Optional[str]] = {}
+        self._retry_count:  Dict[str, int]           = {}
 
-    def update_state(self, device_id, state):   self._state[device_id]   = state
-    def update_inputs(self, device_id, data):   self._inputs[device_id]  = data
-    def update_process(self, device_id, data):  self._process[device_id] = data
-    def get_state(self, device_id):   return self._state.get(device_id, "UNKNOWN")
-    def get_inputs(self, device_id):  return self._inputs.get(device_id)
-    def get_process(self, device_id): return self._process.get(device_id)
+    def update_state(self, device_id, state, retry_count=0, fault_reason=None):
+        self._state[device_id]        = state
+        self._retry_count[device_id]  = retry_count
+        self._fault_reason[device_id] = fault_reason if state == "FAULT" else None
+
+    def update_inputs(self, device_id, data):    self._inputs[device_id]  = data
+    def update_outputs(self, device_id, data):   self._outputs[device_id] = data
+    def update_process(self, device_id, data):   self._process[device_id] = data
+
+    def get_state(self, device_id):        return self._state.get(device_id, "UNKNOWN")
+    def get_inputs(self, device_id):       return self._inputs.get(device_id)
+    def get_outputs(self, device_id):      return self._outputs.get(device_id)
+    def get_process(self, device_id):      return self._process.get(device_id)
+    def get_fault_reason(self, device_id): return self._fault_reason.get(device_id)
+    def get_retry_count(self, device_id):  return self._retry_count.get(device_id, 0)
 
 
 tracker = DeviceStateTracker()
@@ -1948,6 +1967,7 @@ class MessageProcessor:
         tracker.update_process(device_id, data)
         alert_manager.check_reconnection(device_id)
         self._run_analytics(device_id, timestamp, data)
+        realtime_engine.dispatch(device_id, timestamp, data)
 
     def _handle_quality(self, device_id, timestamp, data):
         tds_in_v   = validate_float(data.get("tds_in_voltage"),  0, 5)
@@ -1963,8 +1983,10 @@ class MessageProcessor:
              data.get("fw_version", "")),
         )
         KPIEngine.update_quality_cache(device_id, {
-            "tds_in_ppm":  tds_in_ppm,
-            "tds_out_ppm": tds_out_ppm,
+            "tds_in_voltage":  tds_in_v,
+            "tds_out_voltage": tds_out_v,
+            "tds_in_ppm":      tds_in_ppm,
+            "tds_out_ppm":     tds_out_ppm,
         })
 
     def _handle_state(self, device_id, timestamp, data):
@@ -1975,7 +1997,11 @@ class MessageProcessor:
             (timestamp, device_id, state, STATE_MAP.get(state, -1),
              validate_bool(data.get("running")), data.get("retry", 0)),
         )
-        tracker.update_state(device_id, state)
+        tracker.update_state(
+            device_id, state,
+            retry_count=data.get("retry", 0),
+            fault_reason=data.get("fault_reason") or None,
+        )
         log.info(f"[{device_id}] Estado → {state}")
         if state == "FAULT":
             self._run_analytics(device_id, timestamp, tracker.get_process(device_id) or {})
@@ -1993,15 +2019,21 @@ class MessageProcessor:
         tracker.update_inputs(device_id, inputs)
 
     def _handle_outputs(self, device_id, timestamp, data):
+        outputs = {
+            "pump_low":    validate_bool(data.get("pump_low")),
+            "pump_high":   validate_bool(data.get("pump_high")),
+            "pump_inlet":  validate_bool(data.get("pump_inlet")),
+            "pump_dose":   validate_bool(data.get("pump_dose")),
+            "valve_flush": validate_bool(data.get("valve_flush")),
+            "valve_inlet": validate_bool(data.get("valve_inlet")),
+        }
         db.execute(
             "INSERT INTO telemetry_outputs "
             "(time,device_id,pump_low,pump_high,pump_inlet,pump_dose,valve_flush,valve_inlet) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-            (timestamp, device_id,
-             validate_bool(data.get("pump_low")),    validate_bool(data.get("pump_high")),
-             validate_bool(data.get("pump_inlet")),  validate_bool(data.get("pump_dose")),
-             validate_bool(data.get("valve_flush")), validate_bool(data.get("valve_inlet"))),
+            (timestamp, device_id, *outputs.values()),
         )
+        tracker.update_outputs(device_id, outputs)
 
     # Valid FSM states the firmware can report. Used to guard heartbeat reconciliation.
     _FSM_STATES = {"IDLE", "STARTING", "PRODUCING", "FLUSHING", "STOPPING", "FAULT"}
@@ -2503,7 +2535,7 @@ class AIDecisionEngine:
             f"state={ctx['fsm_state']} connectivity={ctx['connectivity']} samples={n_samples}"
         )
 
-        decision, error = _ai.get_ai_decision(ctx, AI_ENDPOINT_URL, AI_TIMEOUT_SEC)
+        decision, error = _ai.get_ai_decision(ctx, AI_ENDPOINT_URL, AI_TIMEOUT_SEC, api_token=AI_API_TOKEN)
 
         if error:
             log.warning(f"[AI-ENGINE] req={req_id[:8]}… API error: {error}")
@@ -2599,6 +2631,159 @@ class AIDecisionEngine:
 
 
 ai_decision_engine: "AIDecisionEngine" = None
+
+
+# ── Realtime AI Engine ────────────────────────────────────────────────────────
+
+class RealtimeAIEngine:
+    """
+    Per-sample AI calls fired from the MQTT process handler (1 Hz).
+
+    Backpressure: if the previous call for a device has not returned, the new
+    sample is dropped and logged. No queue — stale data is never sent.
+
+    Context window: controlled by AI_REALTIME_CONTEXT_SECONDS (default 0).
+      0  → sample + metadata only; 1 DB query (device_status).
+      >0 → includes context_window; 2 DB queries (device_status + window).
+    """
+
+    _MODE_CACHE_TTL_SEC = 60
+
+    def __init__(self):
+        self._in_flight: set              = set()
+        self._lock                        = threading.Lock()
+        self._executor                    = ThreadPoolExecutor(
+            max_workers=16, thread_name_prefix="ai-rt"
+        )
+        self._mode_cache: Dict[str, tuple] = {}   # device_id → (ai_mode, expires_at)
+
+    def dispatch(self, device_id: str, timestamp: "datetime", process_data: dict) -> None:
+        """Called from _handle_process() in the MQTT callback thread. Must return fast."""
+        if not AI_REALTIME_ENDPOINT_URL:
+            return
+
+        ai_mode = self._get_ai_mode(device_id)
+        if ai_mode == "OFF":
+            return
+
+        with self._lock:
+            if device_id in self._in_flight:
+                log.debug(f"[AI-RT] {device_id}: previous call in-flight — sample dropped")
+                return
+            self._in_flight.add(device_id)
+
+        self._executor.submit(self._call, device_id, timestamp, process_data, ai_mode)
+
+    def _get_ai_mode(self, device_id: str) -> str:
+        cached = self._mode_cache.get(device_id)
+        if cached and cached[1] > time.time():
+            return cached[0]
+        rows = db.fetchall(
+            "SELECT ai_mode FROM devices WHERE device_id = %s", (device_id,)
+        )
+        mode = (rows[0][0] or "OFF") if rows else "OFF"
+        self._mode_cache[device_id] = (mode, time.time() + self._MODE_CACHE_TTL_SEC)
+        return mode
+
+    def _call(self, device_id: str, timestamp: "datetime", process_data: dict, ai_mode: str) -> None:
+        try:
+            quality  = KPIEngine._last_quality.get(device_id, {})
+            ctx = _ai.build_realtime_context(
+                device_id     = device_id,
+                process_data  = process_data,
+                quality_cache = quality,
+                fsm_state     = tracker.get_state(device_id),
+                fault_reason  = tracker.get_fault_reason(device_id),
+                retry_count   = tracker.get_retry_count(device_id),
+                inputs        = tracker.get_inputs(device_id),
+                outputs       = tracker.get_outputs(device_id),
+                db            = db,
+                context_seconds = AI_REALTIME_CONTEXT_SECONDS,
+            )
+
+            req_id = ctx["request_id"]
+            log.info(
+                f"[AI-RT] req={req_id[:8]}… device={device_id} mode={ai_mode} "
+                f"state={ctx['fsm_state']} context_sec={AI_REALTIME_CONTEXT_SECONDS}"
+            )
+
+            decision, error = _ai.get_ai_decision(ctx, AI_REALTIME_ENDPOINT_URL, AI_REALTIME_TIMEOUT_SEC, api_token=AI_REALTIME_API_TOKEN)
+
+            if error:
+                log.warning(f"[AI-RT] req={req_id[:8]}… error: {error}")
+                self._save(device_id, ai_mode, None, False, None, "FAILED", error)
+                return
+
+            dec_type  = decision["decision"]
+            suggested = decision.get("suggested_cmd")
+            log.info(
+                f"[AI-RT] req={req_id[:8]}… decision={dec_type} "
+                f"suggested_cmd={suggested} reason={decision.get('reason', '')!r}"
+            )
+
+            executed    = False
+            exec_status = None
+            exec_result = None
+
+            if ai_mode == "VIEWER":
+                exec_status = "REJECTED"
+                exec_result = "viewer_mode"
+
+            elif ai_mode == "AUTO" and dec_type == "EXECUTE" and suggested:
+                last_cmd, last_at = ai_decision_engine._last_auto.get(device_id, (None, None))
+                allowed, deny_reason = _ai.is_ai_command_allowed(
+                    cmd=suggested,
+                    fsm_state=ctx["fsm_state"],
+                    last_auto_cmd=last_cmd,
+                    last_auto_at=last_at,
+                    auto_cooldown_sec=AI_AUTO_COOLDOWN_SEC,
+                )
+                if not allowed:
+                    exec_status = "REJECTED"
+                    exec_result = deny_reason
+                    log.info(f"[AI-RT] AUTO blocked: {deny_reason}")
+                else:
+                    result = command_engine.issue(device_id, suggested, issued_by="ai_realtime")
+                    if "error" not in result:
+                        executed    = True
+                        exec_status = "SUCCESS"
+                        exec_result = result["command_id"]
+                        ai_decision_engine._last_auto[device_id] = (
+                            suggested, datetime.now(timezone.utc)
+                        )
+                        log.info(f"[AI-RT] AUTO executed {suggested} — device={device_id}")
+                    else:
+                        exec_status = "FAILED"
+                        exec_result = result["error"]
+
+            self._save(device_id, ai_mode, decision, executed,
+                       datetime.now(timezone.utc) if executed else None,
+                       exec_status, exec_result)
+
+        except Exception as e:
+            log.error(f"[AI-RT] {device_id}: unhandled error: {e}", exc_info=True)
+        finally:
+            with self._lock:
+                self._in_flight.discard(device_id)
+
+    def _save(self, device_id, ai_mode, decision, executed, executed_at, exec_status, exec_result):
+        db.execute(
+            "INSERT INTO ai_decisions "
+            "(device_id, ai_mode, decision, confidence, reason, "
+            " suggested_cmd, executed, executed_at, exec_status, exec_result) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                device_id, ai_mode,
+                decision["decision"]          if decision else "ERROR",
+                decision.get("confidence")    if decision else None,
+                decision.get("reason")        if decision else exec_result,
+                decision.get("suggested_cmd") if decision else None,
+                executed, executed_at, exec_status, exec_result,
+            ),
+        )
+
+
+realtime_engine: "RealtimeAIEngine" = None
 
 # ============================================================
 # MQTT
@@ -4163,7 +4348,7 @@ def main():
         log.critical(f"No se pudo conectar al broker: {e}")
         return
 
-    global command_engine, ai_decision_engine, mqtt_client
+    global command_engine, ai_decision_engine, realtime_engine, mqtt_client
     mqtt_client    = client
     command_engine = CommandEngine(client)
     command_engine.start()
@@ -4174,6 +4359,15 @@ def main():
 
     ai_decision_engine = AIDecisionEngine()
     ai_decision_engine.start()
+
+    realtime_engine = RealtimeAIEngine()
+    if AI_REALTIME_ENDPOINT_URL:
+        log.info(
+            f"[AI-RT] Realtime engine active — endpoint={AI_REALTIME_ENDPOINT_URL} "
+            f"timeout={AI_REALTIME_TIMEOUT_SEC}s context_sec={AI_REALTIME_CONTEXT_SECONDS}"
+        )
+    else:
+        log.info("[AI-RT] AI_REALTIME_ENDPOINT_URL not set — realtime engine idle")
 
     log.info("✅ Escuchando MQTT...")
     client.loop_forever()

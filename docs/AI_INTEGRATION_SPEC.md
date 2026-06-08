@@ -1,553 +1,365 @@
-# KAIROX — AI Integration Specification
+# KAIROX — AI Integration API Contract
 
-**Version:** 3.0  
-**Audience:** External AI engine developer  
-**Backend version:** KAIROX v3.4+  
-**Last updated:** 2026-06-04
+**Version:** 4.5  
+**Last updated:** 2026-06-08
 
 ---
 
-## 1. Integration objective
+## Overview
 
-KAIROX is an industrial IoT platform for monitoring, automation, and diagnostics of reverse osmosis (RO) water treatment systems.
+KAIROX sends operational telemetry to an external HTTP endpoint. The endpoint returns a suggested command. KAIROX validates the response and may execute the command.
 
-The backend periodically sends raw operational telemetry for each managed device to an external AI API. The AI engine analyzes this telemetry and returns a **suggested decision**. The AI does **not** directly control any hardware.
-
-The execution chain is:
-
-```
-KAIROX backend → AI API (suggestion) → backend policy layer → optional execution
-```
-
-**The AI role is advisory.** The backend applies independent safety rules before acting on any suggestion. The AI can always be overridden, disabled, or ignored.
-
-### Separation of concerns
-
-| Responsibility | Owner |
-|---|---|
-| Telemetry acquisition | ESP32 firmware |
-| Persistence, buffering, polling rate control | KAIROX backend |
-| Inference, anomaly detection, diagnostics | **AI engine** |
-| Command execution safety | KAIROX backend policy layer |
-| Physical actuation | ESP32 firmware |
-
-The backend sends **raw sensor data only** — no pre-computed risk scores, health labels, or diagnostic summaries. All inference is the AI's responsibility.
+The external endpoint is called by KAIROX — never the reverse. The endpoint does not have access to device infrastructure.
 
 ---
 
-## 2. System architecture
+## Authentication
 
-### Data flow
+KAIROX includes a Bearer token in every outbound request:
 
 ```
-ESP32 firmware (1 Hz MQTT)
-  └─ KAIROX Backend
-       ├─ Persists all telemetry to PostgreSQL
-       └─ AI Decision Engine (poll every AI_POLL_INTERVAL_SEC)
-            └─ Builds telemetry window payload
-                 └─ POST /your-endpoint  ← your API receives this
-                      └─ AI response (JSON)
-                           └─ Validation + Policy Layer
-                                └─ CommandEngine (optional)
-                                     └─ MQTT command → ESP32
+Authorization: Bearer <token>
 ```
 
-### Polling model
+The token is configured on the KAIROX side and injected into every HTTP call. The receiving endpoint must validate it and return `401` if invalid.
 
-**KAIROX controls the polling rate. The AI does not control when it is called.**
-
-- Firmware publishes telemetry at 1 Hz continuously
-- Backend persists every sample to the database
-- Every `AI_POLL_INTERVAL_SEC` seconds, the backend builds a context payload and calls the AI API
-- The AI receives a window of recent samples, not a single point snapshot
-
-| Variable | Default | Description |
-|---|---|---|
-| `AI_POLL_INTERVAL_SEC` | `60` | Seconds between AI calls per device (min: 10) |
-| `AI_WINDOW_SECONDS` | `60` | How far back the telemetry window looks |
-| `AI_SAMPLE_PERIOD_SEC` | `1` | Minimum seconds between consecutive samples in window |
-| `AI_WINDOW_MAX_SAMPLES` | `120` | Hard cap on samples per payload |
-
-### AI modes per device
-
-Each device has an `ai_mode` field configured by the KAIROX operator:
-
-| Mode | AI called? | Command executed? | Description |
-|---|---|---|---|
-| `OFF` | No | No | AI integration disabled for this device |
-| `VIEWER` | Yes | No | Suggestions logged only — no execution ever |
-| `AUTO` | Yes | If policy allows | Backend may execute if all checks pass |
-
-In `VIEWER` mode, the backend logs every suggestion for audit and human review without taking action. This mode is used for observation and model validation before promoting to `AUTO`.
+The token for the current integration is provisioned by the KAIROX team and communicated out-of-band.
 
 ---
 
-## 3. Expected AI endpoint
+## Endpoints
 
-The KAIROX backend calls your API as follows:
+KAIROX supports two call modes. Each is configured independently with its own endpoint URL.
 
-| Parameter | Value |
-|---|---|
-| **Method** | `POST` |
-| **Content-Type** | `application/json` |
-| **Accept** | `application/json` |
-| **Timeout** | Configurable (default: **10 seconds**) |
-| **Frequency** | Once per device per poll interval (default: **60 seconds**) |
-| **Authentication** | To be agreed (Bearer token recommended) |
+| Mode | Status | Trigger | Rate | Timeout |
+|---|---|---|---|---|
+| `BATCH` | Available (not currently active) | Periodic timer | Configurable (default: every 60 s) | 10 s (configurable) |
+| `REALTIME` | **Active** | Each incoming device sample | Up to 1 Hz | 2 s (configurable) |
 
-> The backend drops requests that exceed the timeout and logs the failure. **The AI must respond within the configured timeout.** If the AI is unavailable, the backend continues normally without executing any command.
+Both modes use:
+
+```
+POST <configured-url>
+Content-Type: application/json
+Authorization: Bearer <token>
+```
+
+A single URL may handle both modes. Use the `integration_mode` field to distinguish.
+
+On timeout, KAIROX logs the failure and takes no action. Timed-out calls are not retried.
+
+For REALTIME: if the previous call has not yet returned, the new sample is dropped. Dropped calls are logged.
 
 ---
 
-## 4. Context payload sent by KAIROX
+## Request — BATCH
 
-The backend POSTs the following JSON body on each call.
-
-### Top-level schema
+### Schema
 
 | Field | Type | Description |
 |---|---|---|
-| `request_id` | `string` (UUID4) | Unique identifier for this request. Log it for end-to-end traceability. |
-| `device_id` | `string` | Unique device identifier derived from hardware MAC address. |
-| `timestamp` | `string` (ISO 8601 UTC) | Time of context generation on the backend. |
-| `fsm_state` | `string` | Current FSM state. See [Section 7](#7-fsm-states). |
-| `connectivity` | `"ONLINE"` \| `"OFFLINE"` \| `"UNKNOWN"` | `ONLINE` if last telemetry was received within 90 seconds. |
-| `seconds_since_seen` | `integer` \| `null` | Seconds elapsed since last telemetry message. `null` if never seen. |
-| `telemetry_window` | `object` | Rolling window of recent raw sensor samples. See sub-schema below. |
+| `request_id` | `string` (UUID4) | Unique call identifier. |
+| `integration_mode` | `"BATCH"` | Constant. |
+| `device_id` | `string` | Device identifier. |
+| `timestamp` | `string` (ISO 8601 UTC) | Time this payload was generated. |
+| `fsm_state` | `string` | Current device state. See [FSM states](#fsm-states). |
+| `fault_reason` | `string` \| `null` | Fault cause. Populated only when `fsm_state = "FAULT"`. See [Fault reasons](#fault-reasons). |
+| `retry_count` | `integer` | Number of consecutive failed startup attempts. |
+| `connectivity` | `"ONLINE"` \| `"OFFLINE"` \| `"UNKNOWN"` | `ONLINE` if a sample was received within the last 90 s. |
+| `seconds_since_seen` | `integer` \| `null` | Seconds since last sample. `null` if no sample ever received. |
+| `inputs` | `object` | Digital input states. See [Inputs](#inputs). |
+| `outputs` | `object` | Actuator states. See [Outputs](#outputs). |
+| `telemetry_window` | `object` | Telemetry window. See [Telemetry window](#telemetry-window). |
 
-### `telemetry_window` sub-schema
+### Telemetry window
 
 | Field | Type | Description |
 |---|---|---|
-| `window_seconds` | `integer` | Depth of the window in seconds (configured by KAIROX operator). |
-| `sample_period_seconds` | `integer` | Minimum gap between consecutive samples. |
-| `samples` | `array` | Ordered array of sample objects (ascending by `ts`). May be empty if device has no recent data. |
+| `window_seconds` | `integer` | Duration of the window in seconds. |
+| `sample_period_seconds` | `integer` | Minimum interval between consecutive samples. |
+| `samples` | `array` | Sample objects, ascending by `ts`. May be `[]`. |
 
-### Sample object schema
+### Sample object
 
-Each element of `samples` contains one time-stamped sensor reading. Any field may be `null` if the sensor did not produce data at that timestamp.
+Any field may be `null`.
 
-| Field | Type | Unit | Description |
-|---|---|---|---|
-| `ts` | `string` (ISO 8601 UTC) | — | Timestamp of this sample |
-| `flow_permeate_lpm` | `float` \| `null` | L/min | Permeate (purified water) flow rate |
-| `flow_reject_lpm` | `float` \| `null` | L/min | Reject (brine/concentrate) flow rate |
-| `pressure_in_bar` | `float` \| `null` | bar | Inlet pressure — feed side of membrane (high-pressure pump outlet) |
-| `pressure_out_bar` | `float` \| `null` | bar | Outlet pressure — brine/concentrate side |
-| `pressure_membrane_bar` | `float` \| `null` | bar | Differential pressure across membrane (`pressure_in - pressure_out`). `null` if either pressure is missing. |
-| `volume_permeate_l` | `float` \| `null` | L | Cumulative permeate volume (totalizer, resets on device reboot) |
-| `volume_reject_l` | `float` \| `null` | L | Cumulative reject volume (totalizer) |
-| `tds_in_voltage` | `float` \| `null` | V | Raw ADC voltage — feed water TDS sensor |
-| `tds_out_voltage` | `float` \| `null` | V | Raw ADC voltage — permeate TDS sensor |
-| `tds_in_ppm` | `float` \| `null` | ppm | Feed water TDS — temperature-compensated |
-| `tds_out_ppm` | `float` \| `null` | ppm | Permeate TDS — temperature-compensated |
-| `recovery` | `float` \| `null` | 0–1 | `flow_permeate / (flow_permeate + flow_reject)`. `null` if flows unavailable. |
-| `efficiency` | `float` \| `null` | 0–1 | `1 - (tds_out / tds_in)`. `null` if TDS unavailable or `tds_in = 0`. |
-| `waste_pct` | `float` \| `null` | % | `flow_reject / (flow_permeate + flow_reject) × 100`. |
+| Field | Type | Unit |
+|---|---|---|
+| `ts` | `string` (ISO 8601 UTC) | — |
+| `flow_permeate_lpm` | `float` \| `null` | L/min |
+| `flow_reject_lpm` | `float` \| `null` | L/min |
+| `pressure_in_bar` | `float` \| `null` | bar |
+| `pressure_out_bar` | `float` \| `null` | bar |
+| `volume_permeate_l` | `float` \| `null` | L |
+| `volume_reject_l` | `float` \| `null` | L |
+| `tds_in_ppm` | `float` \| `null` | ppm |
+| `tds_out_ppm` | `float` \| `null` | ppm |
+| `tds_in_voltage` | `float` \| `null` | V |
+| `tds_out_voltage` | `float` \| `null` | V |
 
-### Realistic example payload
+### Example
 
 ```json
 {
   "request_id":         "f3a1c9d2-7e45-4b2a-a831-bc09ef112034",
+  "integration_mode":   "BATCH",
   "device_id":          "ESP32_D0448EC92DF4",
-  "timestamp":          "2026-06-04T14:32:07Z",
+  "timestamp":          "2026-06-08T14:32:07Z",
   "fsm_state":          "PRODUCING",
+  "fault_reason":       null,
+  "retry_count":        0,
   "connectivity":       "ONLINE",
   "seconds_since_seen": 2,
+  "inputs": {
+    "demand":              true,
+    "raw_water_ok":        true,
+    "dose_ok":             true,
+    "pressure_switch":     true,
+    "feed_tank_level_low": false,
+    "spare2":              false
+  },
+  "outputs": {
+    "pump_low":    false,
+    "pump_high":   true,
+    "pump_inlet":  false,
+    "pump_dose":   false,
+    "valve_flush": false,
+    "valve_inlet": true
+  },
   "telemetry_window": {
     "window_seconds":        60,
     "sample_period_seconds": 1,
     "samples": [
       {
-        "ts":                    "2026-06-04T14:31:08Z",
-        "flow_permeate_lpm":     1.85,
-        "flow_reject_lpm":       4.10,
-        "pressure_in_bar":       7.8,
-        "pressure_out_bar":      0.4,
-        "pressure_membrane_bar": 7.4,
-        "volume_permeate_l":     24887.0,
-        "volume_reject_l":       10198.0,
-        "tds_in_voltage":        1.82,
-        "tds_out_voltage":       0.22,
-        "tds_in_ppm":            410.0,
-        "tds_out_ppm":           41.0,
-        "recovery":              0.3109,
-        "efficiency":            0.9000,
-        "waste_pct":             68.9
-      },
-      {
-        "ts":                    "2026-06-04T14:31:09Z",
-        "flow_permeate_lpm":     1.87,
-        "flow_reject_lpm":       4.12,
-        "pressure_in_bar":       7.9,
-        "pressure_out_bar":      0.4,
-        "pressure_membrane_bar": 7.5,
-        "volume_permeate_l":     24888.0,
-        "volume_reject_l":       10199.0,
-        "tds_in_voltage":        1.83,
-        "tds_out_voltage":       0.23,
-        "tds_in_ppm":            412.0,
-        "tds_out_ppm":           43.0,
-        "recovery":              0.3122,
-        "efficiency":            0.8956,
-        "waste_pct":             68.8
+        "ts":                "2026-06-08T14:31:08Z",
+        "flow_permeate_lpm": 1.85,
+        "flow_reject_lpm":   4.10,
+        "pressure_in_bar":   7.8,
+        "pressure_out_bar":  0.4,
+        "volume_permeate_l": 24887.0,
+        "volume_reject_l":   10198.0,
+        "tds_in_ppm":        410.0,
+        "tds_out_ppm":       41.0,
+        "tds_in_voltage":    1.82,
+        "tds_out_voltage":   0.22
       }
     ]
   }
 }
 ```
 
-> **Note on empty windows:** If the device has not sent telemetry recently (e.g., connectivity just restored), `samples` will be an empty array `[]`. The AI must handle this gracefully — always respond `NONE` when the window is empty.
+---
 
-> **Note on null fields:** Any individual field within a sample may be `null` if the corresponding sensor did not produce data at that moment. Treat `null` the same as missing data.
+## Request — REALTIME
+
+Identical top-level schema to BATCH with the following differences:
+
+- `integration_mode` is `"REALTIME"`
+- `telemetry_window` is **absent**
+- `sample` (object) replaces it — the current sample, same schema as a BATCH sample object
+- `context_window` (object) provides recent preceding samples
+
+### `context_window`
+
+**Present only when historical context is enabled by the KAIROX operator. Absent by default.**
+
+When present, the receiving endpoint is responsible for maintaining its own historical state across calls. The context window is provided as convenience only.
+
+| Field | Type | Description |
+|---|---|---|
+| `window_seconds` | `integer` | Duration of the context window in seconds. |
+| `samples` | `array` | Samples preceding `sample`, ascending by `ts`. Does not include `sample`. May be `[]`. |
+
+### Example
+
+```json
+{
+  "request_id":         "b7f2a841-3c19-4e0a-9d12-aabbcc001122",
+  "integration_mode":   "REALTIME",
+  "device_id":          "ESP32_D0448EC92DF4",
+  "timestamp":          "2026-06-08T14:35:22Z",
+  "fsm_state":          "PRODUCING",
+  "fault_reason":       null,
+  "retry_count":        0,
+  "connectivity":       "ONLINE",
+  "seconds_since_seen": 1,
+  "inputs": {
+    "demand":              true,
+    "raw_water_ok":        true,
+    "dose_ok":             true,
+    "pressure_switch":     true,
+    "feed_tank_level_low": false,
+    "spare2":              false
+  },
+  "outputs": {
+    "pump_low":    false,
+    "pump_high":   true,
+    "pump_inlet":  false,
+    "pump_dose":   false,
+    "valve_flush": false,
+    "valve_inlet": true
+  },
+  "sample": {
+    "ts":                "2026-06-08T14:35:21Z",
+    "flow_permeate_lpm": 0.3,
+    "flow_reject_lpm":   4.1,
+    "pressure_in_bar":   7.9,
+    "pressure_out_bar":  0.4,
+    "volume_permeate_l": 24920.0,
+    "volume_reject_l":   10250.0,
+    "tds_in_ppm":        410.0,
+    "tds_out_ppm":       40.0,
+    "tds_in_voltage":    1.82,
+    "tds_out_voltage":   0.21
+  },
+  "context_window": {
+    "window_seconds": 30,
+    "samples": [
+      {
+        "ts":                "2026-06-08T14:34:52Z",
+        "flow_permeate_lpm": 1.85,
+        "flow_reject_lpm":   4.10,
+        "pressure_in_bar":   7.8,
+        "pressure_out_bar":  0.4,
+        "volume_permeate_l": 24917.0,
+        "volume_reject_l":   10247.0,
+        "tds_in_ppm":        410.0,
+        "tds_out_ppm":       41.0,
+        "tds_in_voltage":    1.82,
+        "tds_out_voltage":   0.22
+      }
+    ]
+  }
+}
+```
 
 ---
 
-## 5. Response contract
+## Response
 
-The AI must return a JSON object with **exactly** the following fields. **No additional fields are permitted.**
+The response must be a JSON object with **exactly** these fields. No additional fields are permitted.
 
-### Schema
-
-| Field | Type | Required | Description |
+| Field | Type | Required | Constraints |
 |---|---|---|---|
-| `decision` | `"NONE"` \| `"EXECUTE"` | Yes | Whether the AI suggests taking action. |
-| `confidence` | `float` (0.0–1.0) | Yes | AI's confidence in its decision. Informational only — does not affect execution. |
-| `reason` | `string` (1–500 chars) | Yes | Brief, human-readable explanation. Must not be empty. |
-| `suggested_cmd` | `null` \| `"START"` \| `"STOP"` \| `"FLUSH"` \| `"RST"` | Conditional | Required when `decision = "EXECUTE"`. Must be `null` or absent when `decision = "NONE"`. |
+| `decision` | `string` | Yes | `"NONE"` or `"EXECUTE"` |
+| `confidence` | `float` | Yes | `[0.0, 1.0]` |
+| `reason` | `string` | Yes | Non-empty, max 500 characters |
+| `suggested_cmd` | `string` \| `null` | Conditional | Non-null when `decision = "EXECUTE"`. `null` or absent when `decision = "NONE"`. |
 
-### Strict rules
+`suggested_cmd` accepted values: `START`, `STOP`, `FLUSH`, `RST` (case-insensitive).
 
-- `suggested_cmd` values are case-insensitive — `"flush"` and `"FLUSH"` are both accepted.
-- `reason` must be a non-empty string of at most 500 characters. Do not include HTML or markdown.
-- `confidence` is structural validation only — the backend does **not** apply a threshold to block execution. The AI is responsible for deciding when confidence warrants an `EXECUTE` decision.
-- Any response with unexpected fields will be **rejected entirely**. The backend will log the violation and skip the cycle for that device.
-
-### Response examples
-
-#### Decision: no action
+### Example — no action
 
 ```json
 {
   "decision":      "NONE",
   "confidence":    0.94,
-  "reason":        "All 60 samples within normal parameters — flow stable, TDS nominal",
+  "reason":        "No action required",
   "suggested_cmd": null
 }
 ```
 
-#### Decision: execute flush
+### Example — suggest command
 
 ```json
 {
   "decision":      "EXECUTE",
   "confidence":    0.89,
-  "reason":        "TDS output rising over last 60s (41→68 ppm), differential pressure increasing — preventive flush recommended",
-  "suggested_cmd": "FLUSH"
-}
-```
-
-#### Invalid response — will be rejected
-
-```json
-{
-  "decision":      "EXECUTE",
-  "confidence":    0.91,
-  "reason":        "Stopping system",
-  "suggested_cmd": "STOP",
-  "model_version": "v2.1"
-}
-```
-
-**Rejection reason:** field `model_version` is not in the allowed set. The backend rejects the entire response and logs `validation failed: unexpected fields in response: ['model_version']`.
-
----
-
-## 6. Operational rules for the AI
-
-1. **Do not assume absolute authority.** The backend applies independent policy checks. An `EXECUTE` decision may still be blocked — this is by design.
-
-2. **Prioritize stability.** When in doubt, respond `NONE`. An unnecessary command is worse than a missed opportunity.
-
-3. **Avoid oscillations.** Do not alternate `START` and `STOP` commands in successive cycles. The backend's anti-oscillation guard will block rapid reversals.
-
-4. **Respect FSM semantics.** Each command is only valid in certain states (see [Section 8](#8-valid-commands)). Suggesting `START` when the system is already `PRODUCING` will be rejected.
-
-5. **Respond `NONE` under uncertainty.** If connectivity is `OFFLINE`, `samples` is empty, or key metrics are all `null`, prefer `NONE` unless there is a specific evidence-backed reason to act.
-
-6. **Use the full window.** The telemetry window is provided for trend detection. A single anomalous sample is less meaningful than a consistent pattern across 30–60 samples.
-
-7. **Keep reasons concise and actionable.** A useful reason is: `"TDS rising 41→68 ppm over 60s — flush recommended"`. An unhelpful reason is: `"Anomaly detected"`. Include specific values when possible.
-
----
-
-## 7. FSM states
-
-The `fsm_state` field reflects the current state of the device's finite state machine.
-
-| State | Description |
-|---|---|
-| `IDLE` | System stopped, all outputs off. Waiting for demand signal. |
-| `STARTING` | Startup sequence in progress: low-pressure pump on, filling lines. |
-| `PRODUCING` | High-pressure pump active, generating permeate. Normal operating state. |
-| `FLUSHING` | Post-cycle membrane flush in progress. Lasts approximately 60 seconds. |
-| `STOPPING` | Graceful shutdown transition (brief, immediately moves to `IDLE`). |
-| `FAULT` | System locked out. Possible causes: startup retries exhausted (`MAX_RETRIES`), permeate flow too low (`FLOW_LOW`), water recovery out of range (`RECOVERY_LOW` / `RECOVERY_HIGH`). Requires `RST` command to recover. |
-| `UNKNOWN` | Backend has not received a state update since startup. Not a firmware state — a backend observation. |
-
-> **FAULT handling:** When `fsm_state = "FAULT"`, the most useful AI action is usually to suggest `RST` after confirming the root cause is resolvable (e.g., a transient flow anomaly). Do not suggest `RST` repeatedly if the device enters FAULT again immediately — that indicates a persistent hardware issue requiring operator intervention.
-
----
-
-## 8. Valid commands
-
-| Command | Valid from states | Effect |
-|---|---|---|
-| `START` | `IDLE` | Initiates startup sequence → `STARTING` → `PRODUCING` |
-| `STOP` | `STARTING`, `PRODUCING`, `FLUSHING` | Graceful shutdown: from `PRODUCING` → `FLUSHING` → `IDLE`; from others → `IDLE` immediately |
-| `FLUSH` | `PRODUCING` | Forces membrane flush cycle → `FLUSHING` → `IDLE` |
-| `RST` | `FAULT`, `STARTING`, `FLUSHING` | Clears fault state, resets retry counter → `IDLE`. **Not valid in `IDLE`** (backend will reject). |
-
-> If the AI suggests a command for a state in which it is not valid, the backend policy layer will block execution and log the rejection reason.
-
----
-
-## 9. Backend policy layer
-
-Even if the AI returns `decision = "EXECUTE"`, the backend applies independent validation before executing. The suggestion may be **blocked** by any of the following:
-
-| Check | Description |
-|---|---|
-| **Whitelist** | `suggested_cmd` must be one of `START`, `STOP`, `FLUSH`, `RST`. |
-| **FSM compatibility** | The command must be valid for the current `fsm_state`. |
-| **Cooldown** | Minimum **300 seconds** must elapse between consecutive AI-initiated commands for the same device. |
-| **Anti-oscillation** | Alternating `START` ↔ `STOP` within 60 seconds is blocked regardless of cooldown. |
-
-The backend records every decision (including blocked ones) in its `ai_decisions` audit table with `exec_status = REJECTED` and the specific policy violation. **The AI does not receive feedback about whether its suggestion was executed.**
-
----
-
-## 10. Example use cases
-
-### Rising TDS — recommend flush
-
-```
-Input:
-  fsm_state: PRODUCING
-  samples: 60 samples over 60 seconds
-    first 30: tds_out_ppm ~40–45 ppm
-    last 30:  tds_out_ppm ~70–85 ppm (rising trend)
-    pressure_membrane_bar: stable at 7.4 bar
-
-Expected response:
-  decision:      EXECUTE
-  suggested_cmd: FLUSH
-  confidence:    0.87
-  reason:        "TDS output rose from 42 to 83 ppm over last 60s — membrane scaling likely, flush recommended"
-```
-
-### Zero permeate flow in PRODUCING — stop
-
-```
-Input:
-  fsm_state: PRODUCING
-  samples: 30 samples
-    flow_permeate_lpm: 0.0 across all samples
-    pressure_in_bar: 7.5 bar (pump running)
-
-Expected response:
-  decision:      EXECUTE
-  suggested_cmd: STOP
-  confidence:    0.96
-  reason:        "Zero permeate flow for 30 consecutive samples while pump active — possible blockage or membrane failure"
-```
-
-### System stable — no action
-
-```
-Input:
-  fsm_state: PRODUCING
-  samples: 60 samples, all within normal bands
-    flow_permeate_lpm: 1.8–2.1
-    tds_out_ppm: 38–44
-    recovery: 0.30–0.33
-
-Expected response:
-  decision:      NONE
-  confidence:    0.95
-  reason:        "All parameters stable over 60 samples — flow, TDS, and recovery within normal range"
-  suggested_cmd: null
-```
-
-### Device offline — no action
-
-```
-Input:
-  connectivity: OFFLINE
-  fsm_state:    UNKNOWN
-  telemetry_window.samples: []
-
-Expected response:
-  decision:      NONE
-  confidence:    0.99
-  reason:        "Device offline — no telemetry available, cannot make a safe decision"
-  suggested_cmd: null
-```
-
-### Fault state — reset
-
-```
-Input:
-  fsm_state:    FAULT
-  connectivity: ONLINE
-  samples: last samples show flow_permeate_lpm returning to normal range
-
-Expected response:
-  decision:      EXECUTE
-  suggested_cmd: RST
-  confidence:    0.88
-  reason:        "Device in FAULT — flow samples show recovery, resetting to allow restart attempt"
-```
-
----
-
-## 11. Recommendations for the AI developer
-
-| Topic | Recommendation |
-|---|---|
-| **Latency** | Target < 3 seconds. Default timeout is 10 seconds; exceeding it is logged as a failure. |
-| **Temporal reasoning** | Use the full sample window for trend detection. A single anomalous sample is insufficient evidence for `EXECUTE`. |
-| **Null tolerance** | Any metric in any sample may be `null`. Degrade gracefully — never raise an error on missing data. |
-| **Empty window** | `samples: []` means no recent telemetry. Always respond `NONE`. |
-| **OFFLINE handling** | When `connectivity = "OFFLINE"`, always respond `NONE`. |
-| **UNKNOWN state** | When `fsm_state = "UNKNOWN"`, respond `NONE` unless another strong signal warrants action. |
-| **FAULT handling** | Suggest `RST` only when evidence supports recovery. Repeated FAULT→RST→FAULT cycles indicate a hardware issue — respond `NONE` and note it in the reason. |
-| **Logging** | Log the `request_id` from every incoming request for traceability. |
-| **Reason field** | Reference specific values: `"TDS rising 42→83 ppm over 60s"` not `"anomaly detected"`. |
-| **Confidence calibration** | Calibrate to actual decision quality. Avoid always returning 0.99 — it reduces audit value. |
-| **Stability** | For a given context input, the decision should be stable across calls. |
-
----
-
-## 12. Complete request/response example
-
-### Full request
-
-```http
-POST https://your-ai-api.example.com/decide
-Content-Type: application/json
-
-{
-  "request_id":         "a1b2c3d4-0000-4000-8000-112233445566",
-  "device_id":          "ESP32_D0448EC92DF4",
-  "timestamp":          "2026-06-04T14:32:07Z",
-  "fsm_state":          "PRODUCING",
-  "connectivity":       "ONLINE",
-  "seconds_since_seen": 2,
-  "telemetry_window": {
-    "window_seconds":        60,
-    "sample_period_seconds": 1,
-    "samples": [
-      {
-        "ts":                    "2026-06-04T14:31:08Z",
-        "flow_permeate_lpm":     2.1,
-        "flow_reject_lpm":       3.9,
-        "pressure_in_bar":       7.4,
-        "pressure_out_bar":      0.3,
-        "pressure_membrane_bar": 7.1,
-        "volume_permeate_l":     24890.0,
-        "volume_reject_l":       10200.0,
-        "tds_in_voltage":        1.80,
-        "tds_out_voltage":       0.21,
-        "tds_in_ppm":            285.0,
-        "tds_out_ppm":           10.9,
-        "recovery":              0.3500,
-        "efficiency":            0.9617,
-        "waste_pct":             65.0
-      }
-    ]
-  }
-}
-```
-
-### Response: NONE
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{
-  "decision":      "NONE",
-  "confidence":    0.78,
-  "reason":        "Flow and TDS stable across all samples — no action required",
-  "suggested_cmd": null
-}
-```
-
-### Response: EXECUTE
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-
-{
-  "decision":      "EXECUTE",
-  "confidence":    0.85,
-  "reason":        "TDS output trending up 10.9→62.3 ppm over 60 samples with stable inlet — flush recommended",
+  "reason":        "TDS output rising over last 60 samples",
   "suggested_cmd": "FLUSH"
 }
 ```
 
 ---
 
-## 13. Future extensions (informational)
+## Validation
 
-| Extension | Description |
+Responses failing any check are rejected entirely. No partial processing.
+
+| Condition | Error |
 |---|---|
-| **Fault reason in payload** | The firmware now reports fault cause (`FLOW_LOW`, `RECOVERY_LOW`, `RECOVERY_HIGH`, `MAX_RETRIES`) in the `/state` topic. This field may be added to the AI context payload in a future version to help the AI distinguish fault types without inferring from flow/TDS patterns. |
-| **Extended command set** | Additional commands may be added (e.g., `CALIBRATE`, `SERVICE_MODE`). All new commands will appear in the whitelist documentation before deployment. |
-| **Longer history windows** | Window depth is configurable via `AI_WINDOW_SECONDS`. Deeper windows (10–60 minutes) may be enabled per device for degradation trend analysis. |
-| **Per-device model adaptation** | Device-specific baseline learning to personalize thresholds per installation. |
-| **AI feedback loop** | Optional structured feedback from KAIROX to the AI API indicating whether suggested commands were executed and what the outcome was. |
+| Response is not a JSON object | `response must be a JSON object` |
+| Unexpected field present | `unexpected fields in response: ['<field>']` |
+| `decision` not in `{"NONE", "EXECUTE"}` | `decision='<value>' not in allowed values` |
+| `confidence` not a float in [0.0, 1.0] | `confidence must be a float in [0.0, 1.0]` |
+| `reason` empty or not a string | `reason must be a non-empty string` |
+| `reason` exceeds 500 characters | `reason must be at most 500 characters` |
+| `decision = "EXECUTE"` with null or absent `suggested_cmd` | `decision=EXECUTE requires a non-empty 'suggested_cmd'` |
+| `suggested_cmd` not in `{START, STOP, FLUSH, RST}` | `suggested_cmd='<value>' not in whitelist` |
+
+Rejected responses are logged. No feedback is sent to the endpoint.
 
 ---
 
-## Appendix A: Validation rules reference
+## Reference
 
-| Rule | Check | Rejection message example |
+### FSM states
+
+| Value | Description |
+|---|---|
+| `IDLE` | System stopped. |
+| `STARTING` | Startup sequence in progress. |
+| `PRODUCING` | Active production. |
+| `FLUSHING` | Flush cycle in progress. |
+| `STOPPING` | Brief transitional state before `IDLE`. |
+| `FAULT` | System locked. `fault_reason` is populated. |
+| `UNKNOWN` | No state received yet. |
+
+### Fault reasons
+
+| Value | Description |
+|---|---|
+| `FLOW_LOW` | Permeate flow below threshold. |
+| `RECOVERY_LOW` | Water recovery ratio below threshold. |
+| `RECOVERY_HIGH` | Water recovery ratio above threshold. |
+| `MAX_RETRIES` | Startup retry limit reached. |
+
+### Commands
+
+| Value | Description |
+|---|---|
+| `START` | Start production. |
+| `STOP` | Stop production. |
+| `FLUSH` | Run flush cycle. |
+| `RST` | Clear fault and reset. |
+
+### Inputs
+
+| Field | Description |
+|---|---|
+| `demand` | Storage tank requesting production. |
+| `raw_water_ok` | Feed water supply available. |
+| `dose_ok` | Dosing system ready. |
+| `pressure_switch` | Pressure switch state. |
+| `feed_tank_level_low` | Feed tank level low alarm. |
+| `spare2` | Spare digital input. |
+
+### Outputs
+
+| Field | Description |
+|---|---|
+| `pump_low` | Low-pressure pump. |
+| `pump_high` | High-pressure pump. |
+| `pump_inlet` | Inlet/well pump. |
+| `pump_dose` | Dosing pump. |
+| `valve_flush` | Flush valve. |
+| `valve_inlet` | Inlet valve. |
+
+### Sensor fields
+
+| Field | Unit | Description |
 |---|---|---|
-| Response type | Must be a JSON object | `response must be a JSON object` |
-| No extra fields | Only `decision`, `confidence`, `reason`, `suggested_cmd` allowed | `unexpected fields in response: ['model_version']` |
-| `decision` value | Must be `"NONE"` or `"EXECUTE"` | `decision='RESTART' not in allowed values` |
-| `confidence` type | Float in `[0.0, 1.0]` | `confidence must be a float in [0.0, 1.0], got 1.5` |
-| `reason` type | Non-empty string, max 500 chars | `reason must be a non-empty string` |
-| `suggested_cmd` if EXECUTE | Must be present and non-empty | `decision=EXECUTE requires a non-empty 'suggested_cmd' field` |
-| `suggested_cmd` whitelist | Must be one of `START`, `STOP`, `FLUSH`, `RST` | `suggested_cmd='REBOOT' not in whitelist` |
+| `flow_permeate_lpm` | L/min | Permeate flow rate. |
+| `flow_reject_lpm` | L/min | Reject flow rate. |
+| `pressure_in_bar` | bar | Inlet pressure. |
+| `pressure_out_bar` | bar | Outlet pressure. |
+| `volume_permeate_l` | L | Cumulative permeate volume. Resets on device reboot. |
+| `volume_reject_l` | L | Cumulative reject volume. Resets on device reboot. |
+| `tds_in_ppm` | ppm | Feed water TDS. |
+| `tds_out_ppm` | ppm | Permeate TDS. |
+| `tds_in_voltage` | V | Raw ADC voltage — feed TDS sensor. |
+| `tds_out_voltage` | V | Raw ADC voltage — permeate TDS sensor. |
 
 ---
 
-## Appendix B: Field name reference
-
-All field names in the telemetry payload are in English. This table maps the canonical names to their physical meaning for quick reference.
-
-| Field | Physical meaning |
-|---|---|
-| `flow_permeate_lpm` | Purified water output (L/min) |
-| `flow_reject_lpm` | Brine/concentrate discharge (L/min) |
-| `pressure_in_bar` | High-pressure pump outlet / membrane feed (bar) |
-| `pressure_out_bar` | Brine side pressure (bar) |
-| `pressure_membrane_bar` | Differential: `pressure_in − pressure_out` (bar) |
-| `volume_permeate_l` | Cumulative purified water produced (L) |
-| `volume_reject_l` | Cumulative brine discharged (L) |
-| `tds_in_ppm` | Feed water total dissolved solids (ppm) |
-| `tds_out_ppm` | Permeate total dissolved solids (ppm) |
-| `tds_in_voltage` / `tds_out_voltage` | Raw sensor voltage before polynomial conversion (V) |
-| `recovery` | Fraction of feed water converted to permeate |
-| `efficiency` | Membrane TDS rejection rate (1 = perfect rejection) |
-| `waste_pct` | Fraction of total flow discharged as reject (%) |
-
----
-
-*KAIROX AI Integration Specification v3.0 — 2026-06-04*  
-*For integration questions, contact the KAIROX engineering team.*
+*KAIROX AI Integration API Contract v4.5 — 2026-06-08*

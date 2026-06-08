@@ -252,12 +252,112 @@ def build_context(
     return ctx
 
 
+# ── Realtime context builder ───────────────────────────────────────────────────
+
+def build_realtime_context(
+    device_id: str,
+    process_data: dict,
+    quality_cache: dict,
+    fsm_state: str,
+    fault_reason: Optional[str],
+    retry_count: int,
+    inputs: Optional[dict],
+    outputs: Optional[dict],
+    db: Any,
+    context_seconds: int = 0,
+) -> dict:
+    """
+    Build a REALTIME integration payload for a just-arrived process sample.
+
+    process_data  — alias-translated MQTT process dict (already field-renamed)
+    quality_cache — last known quality values from KPIEngine cache (no DB query)
+    fsm_state     — current FSM state from DeviceStateTracker (no DB query)
+    fault_reason  — current fault cause from DeviceStateTracker (no DB query)
+    retry_count   — current retry counter from DeviceStateTracker (no DB query)
+    inputs/outputs — current digital states from DeviceStateTracker (no DB query)
+
+    context_seconds=0 (default): payload contains sample + metadata only.
+      DB queries: 1 (device_status for connectivity).
+    context_seconds>0: payload includes context_window with recent history.
+      DB queries: 2 (device_status + telemetry window).
+    """
+    now_utc    = datetime.now(timezone.utc)
+    request_id = str(uuid.uuid4())
+
+    # ── Connectivity ──────────────────────────────────────────────────────────
+    connectivity       = "UNKNOWN"
+    seconds_since_seen = None
+
+    st = db.fetchall(
+        "SELECT online, last_seen FROM device_status WHERE device_id = %s",
+        (device_id,),
+    )
+    if st:
+        last_seen = st[0][1]
+        if last_seen is not None:
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            secs_ago           = int((now_utc - last_seen).total_seconds())
+            seconds_since_seen = secs_ago
+            connectivity       = "ONLINE" if secs_ago < 90 else "OFFLINE"
+
+    # ── Current sample — firmware field names mapped to API names ─────────────
+    ts_raw = process_data.get("ts")
+    ts_str = (
+        ts_raw.isoformat()
+        if isinstance(ts_raw, datetime) else
+        now_utc.isoformat()
+    )
+
+    sample: dict = {
+        "ts":                ts_str,
+        "flow_permeate_lpm": process_data.get("flow_permeate_lpm"),
+        "flow_reject_lpm":   process_data.get("flow_reject_lpm"),
+        "pressure_in_bar":   process_data.get("pressure_membrane_bar"),  # firmware→API rename
+        "pressure_out_bar":  process_data.get("pressure_brine_bar"),     # firmware→API rename
+        "volume_permeate_l": process_data.get("volume_permeate_l"),
+        "volume_reject_l":   process_data.get("volume_reject_l"),
+        "tds_in_ppm":        quality_cache.get("tds_in_ppm"),
+        "tds_out_ppm":       quality_cache.get("tds_out_ppm"),
+        "tds_in_voltage":    quality_cache.get("tds_in_voltage"),
+        "tds_out_voltage":   quality_cache.get("tds_out_voltage"),
+    }
+
+    # ── Assemble payload ──────────────────────────────────────────────────────
+    payload: dict = {
+        "request_id":         request_id,
+        "integration_mode":   "REALTIME",
+        "device_id":          device_id,
+        "timestamp":          now_utc.isoformat(),
+        "fsm_state":          fsm_state or "UNKNOWN",
+        "fault_reason":       fault_reason,
+        "retry_count":        retry_count,
+        "connectivity":       connectivity,
+        "seconds_since_seen": seconds_since_seen,
+        "inputs":             inputs  or {},
+        "outputs":            outputs or {},
+        "sample":             sample,
+    }
+
+    # ── Context window — only when configured (AI_REALTIME_CONTEXT_SECONDS > 0) ─
+    if context_seconds > 0:
+        payload["context_window"] = _build_telemetry_window(
+            device_id, db,
+            window_seconds=context_seconds,
+            sample_period_sec=1,
+            max_samples=context_seconds,
+        )
+
+    return payload
+
+
 # ── AI API call ────────────────────────────────────────────────────────────────
 
 def get_ai_decision(
     context: dict,
     endpoint_url: str,
     timeout_sec: int,
+    api_token: str = "",
 ) -> Tuple[Optional[dict], Optional[str]]:
     """
     POST context to the external AI API and return the parsed decision.
@@ -272,11 +372,14 @@ def get_ai_decision(
         return None, "context must be a dict"
 
     try:
+        headers = {"Content-Type": "application/json"}
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
         resp = requests.post(
             endpoint_url,
             json=context,
             timeout=timeout_sec,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         resp.raise_for_status()
     except requests.exceptions.Timeout:
