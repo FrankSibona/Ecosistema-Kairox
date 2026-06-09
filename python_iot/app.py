@@ -2158,7 +2158,7 @@ class MessageProcessor:
                 ON CONFLICT (device_id) DO UPDATE SET
                 last_seen          = EXCLUDED.last_seen,
                 online             = TRUE,
-                state              = EXCLUDED.state,
+                state              = CASE WHEN EXCLUDED.state = 'UNKNOWN' THEN device_status.state ELSE EXCLUDED.state END,
                 last_severity      = EXCLUDED.last_severity,
                 last_diag_code     = EXCLUDED.last_diag_code,
                 last_diag_message  = EXCLUDED.last_diag_message,
@@ -2232,7 +2232,7 @@ class MessageProcessor:
                 ON CONFLICT (device_id) DO UPDATE SET
                 last_seen         = EXCLUDED.last_seen,
                 online            = TRUE,
-                state             = EXCLUDED.state,
+                state             = CASE WHEN EXCLUDED.state = 'UNKNOWN' THEN device_status.state ELSE EXCLUDED.state END,
                 last_severity     = EXCLUDED.last_severity,
                 last_diag_code    = EXCLUDED.last_diag_code,
                 last_diag_message = EXCLUDED.last_diag_message,
@@ -4330,6 +4330,19 @@ def main():
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS max_recovery_pct        FLOAT   DEFAULT 85.0")
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS recovery_fault_delay_sec INTEGER DEFAULT 60")
     log.info("✅ Schema migrations aplicadas")
+
+    # Pre-populate tracker from DB so panels show correct state after restart
+    # without waiting for the firmware to re-send state via MQTT (on-change only)
+    rows = db.fetchall(
+        "SELECT d.device_id, ds.state, ds.last_seen "
+        "FROM devices d "
+        "LEFT JOIN device_status ds ON d.device_id = ds.device_id "
+        "WHERE COALESCE(ds.state, 'UNKNOWN') != 'UNKNOWN'"
+    )
+    for device_id, state, _ in rows:
+        tracker.update_state(device_id, state)
+    if rows:
+        log.info(f"✅ Tracker inicializado: {len(rows)} dispositivos desde DB")
 
     api_thread = threading.Thread(target=_start_api, daemon=True)
     api_thread.start()
