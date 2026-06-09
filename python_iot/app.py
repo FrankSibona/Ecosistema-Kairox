@@ -1966,8 +1966,8 @@ class MessageProcessor:
         )
         tracker.update_process(device_id, data)
         alert_manager.check_reconnection(device_id)
-        self._run_analytics(device_id, timestamp, data)
         realtime_engine.dispatch(device_id, timestamp, data)
+        self._run_analytics(device_id, timestamp, data)
 
     def _handle_quality(self, device_id, timestamp, data):
         tds_in_v   = validate_float(data.get("tds_in_voltage"),  0, 5)
