@@ -307,7 +307,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  health_message AS \"Diagnóstico\"\r\nFROM device_status\r\nWHERE device_id = '$device';",
+          "rawSql": "SELECT\n  CASE state\n    WHEN 'FAULT' THEN last_diag_message\n    ELSE COALESCE(health_message, state)\n  END AS \"Diagnóstico\"\nFROM device_status\nWHERE device_id = '$device';",
           "refId": "A",
           "sql": {
             "columns": [

@@ -133,7 +133,7 @@
           }
         }
       ],
-      "title": "\ud83d\udcf6 Conectividad",
+      "title": "📶 Conectividad",
       "type": "stat"
     },
     {
@@ -152,32 +152,32 @@
                 "FAULT": {
                   "color": "red",
                   "index": 4,
-                  "text": "\ud83d\udd34 Falla"
+                  "text": "🔴 Falla"
                 },
                 "IDLE": {
                   "color": "super-light-blue",
                   "index": 2,
-                  "text": "\u23f8\ufe0f En espera"
+                  "text": "⏸️ En espera"
                 },
                 "PRODUCING": {
                   "color": "green",
                   "index": 0,
-                  "text": "\u2699\ufe0f Produciendo"
+                  "text": "⚙️ Produciendo"
                 },
                 "STARTING": {
                   "color": "light-blue",
                   "index": 1,
-                  "text": "\ud83d\udd04 Arrancando"
+                  "text": "🔄 Arrancando"
                 },
                 "STOPPING": {
                   "color": "light-blue",
                   "index": 3,
-                  "text": "\u23f9\ufe0f Deteniendo"
+                  "text": "⏹️ Deteniendo"
                 },
                 "UNKNOWN": {
                   "color": "super-light-blue",
                   "index": 5,
-                  "text": "\u26aa Sin datos"
+                  "text": "⚪ Sin datos"
                 }
               },
               "type": "value"
@@ -255,7 +255,7 @@
           }
         }
       ],
-      "title": "\ud83d\udfe2 Estado del equipo",
+      "title": "🟢 Estado del equipo",
       "type": "stat"
     },
     {
@@ -315,7 +315,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  health_message AS \"Diagn\u00f3stico\"\r\nFROM device_status\r\nWHERE device_id = '$device';",
+          "rawSql": "SELECT\n  CASE state\n    WHEN 'FAULT' THEN last_diag_message\n    ELSE COALESCE(health_message, state)\n  END AS \"Diagnóstico\"\nFROM device_status\nWHERE device_id = '$device';",
           "refId": "A",
           "sql": {
             "columns": [
@@ -340,7 +340,7 @@
           }
         }
       ],
-      "title": "\ud83e\udde0 Diagn\u00f3stico",
+      "title": "🧠 Diagnóstico",
       "type": "stat"
     },
     {
@@ -359,7 +359,7 @@
                 "CRITICAL": {
                   "color": "red",
                   "index": 3,
-                  "text": "CR\u00cdTICO"
+                  "text": "CRÍTICO"
                 },
                 "HIGH": {
                   "color": "orange",
@@ -452,7 +452,7 @@
           }
         }
       ],
-      "title": "\u26a0\ufe0f Riesgo",
+      "title": "⚠️ Riesgo",
       "type": "stat"
     },
     {
@@ -544,7 +544,7 @@
           }
         }
       ],
-      "title": "\u23f1\ufe0f Minutos sin se\u00f1al",
+      "title": "⏱️ Minutos sin señal",
       "type": "stat"
     },
     {
@@ -563,7 +563,7 @@
                 "CRITICAL": {
                   "color": "red",
                   "index": 2,
-                  "text": "CR\u00cdTICO"
+                  "text": "CRÍTICO"
                 },
                 "HEALTHY": {
                   "color": "green",
@@ -656,7 +656,7 @@
           }
         }
       ],
-      "title": "\u2764\ufe0f Salud",
+      "title": "❤️ Salud",
       "type": "stat"
     },
     {
@@ -716,7 +716,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  COALESCE(health_action, last_action, 'Sin acci\u00f3n requerida') AS \"Acci\u00f3n recomendada\"\r\nFROM device_status\r\nWHERE device_id = '$device';",
+          "rawSql": "SELECT\r\n  COALESCE(health_action, last_action, 'Sin acción requerida') AS \"Acción recomendada\"\r\nFROM device_status\r\nWHERE device_id = '$device';",
           "refId": "A",
           "sql": {
             "columns": [
@@ -741,7 +741,7 @@
           }
         }
       ],
-      "title": "\ud83d\udca1 Accion recomendada",
+      "title": "💡 Accion recomendada",
       "type": "stat"
     },
     {
@@ -841,7 +841,7 @@
           }
         }
       ],
-      "title": "\ud83e\uddea Calidad de Agua",
+      "title": "🧪 Calidad de Agua",
       "type": "stat"
     },
     {
@@ -928,7 +928,7 @@
           }
         }
       ],
-      "title": "\ud83d\udca7 Caudal ",
+      "title": "💧 Caudal ",
       "type": "stat"
     },
     {
@@ -1015,14 +1015,14 @@
           }
         }
       ],
-      "title": "\ud83d\udd35 Producci\u00f3n diaria",
+      "title": "🔵 Producción diaria",
       "type": "stat"
     },
     {
       "datasource": {
         "uid": "dfdcy982omdxce"
       },
-      "description": "Porcentaje de agua de entrada que se convierte en agua purificada.\nValores bajos indican desperdicio; valores altos pueden generar incrustaciones en la membrana.\nRango \u00f3ptimo t\u00edpico: 50\u201375%.",
+      "description": "Porcentaje de agua de entrada que se convierte en agua purificada.\nValores bajos indican desperdicio; valores altos pueden generar incrustaciones en la membrana.\nRango óptimo típico: 50–75%.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1101,7 +1101,7 @@
           }
         }
       ],
-      "title": "\u2699\ufe0f Recuperaci\u00f3n",
+      "title": "⚙️ Recuperación",
       "type": "stat"
     },
     {
@@ -1187,7 +1187,7 @@
           }
         }
       ],
-      "title": "\u26a1 Eficiencia",
+      "title": "⚡ Eficiencia",
       "type": "stat"
     },
     {
@@ -1200,7 +1200,7 @@
       },
       "id": 16,
       "panels": [],
-      "title": "DEGRADACI\u00d3N",
+      "title": "DEGRADACIÓN",
       "type": "row"
     },
     {
@@ -1286,7 +1286,7 @@
           }
         }
       ],
-      "title": "\u0394P membrana",
+      "title": "ΔP membrana",
       "type": "stat"
     },
     {
@@ -1402,7 +1402,7 @@
           }
         }
       ],
-      "title": "\ud83d\udcc8 \u0394P membrana",
+      "title": "📈 ΔP membrana",
       "type": "timeseries"
     },
     {
@@ -1518,7 +1518,7 @@
           }
         }
       ],
-      "title": "\ud83d\udcc9 Eficiencia en el tiempo",
+      "title": "📉 Eficiencia en el tiempo",
       "type": "timeseries"
     },
     {
@@ -1816,7 +1816,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Dosificaci\u00f3n"
+              "options": "Dosificación"
             },
             "properties": [
               {
@@ -1827,7 +1827,7 @@
                       "false": {
                         "color": "red",
                         "index": 1,
-                        "text": "Falta qu\u00edmico"
+                        "text": "Falta químico"
                       },
                       "true": {
                         "color": "green",
@@ -1855,7 +1855,7 @@
                       "false": {
                         "color": "red",
                         "index": 1,
-                        "text": "Baja presi\u00f3n"
+                        "text": "Baja presión"
                       },
                       "true": {
                         "color": "green",
@@ -1889,7 +1889,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  demand      AS \"Demanda\",\r\n  raw_water_ok    AS \"Agua cruda\",\r\n  dose_ok     AS \"Dosificaci\u00f3n\",\r\n  pressure_switch  AS \"Presostato\",\r\n  feed_tank_level_low    AS \"Reserva 1\",\r\n  spare2    AS \"Reserva 2\"\r\nFROM telemetry_inputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\r\n  demand      AS \"Demanda\",\r\n  raw_water_ok    AS \"Agua cruda\",\r\n  dose_ok     AS \"Dosificación\",\r\n  pressure_switch  AS \"Presostato\",\r\n  feed_tank_level_low    AS \"Reserva 1\",\r\n  spare2    AS \"Reserva 2\"\r\nFROM telemetry_inputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1973,7 +1973,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "V\u00e1lvula entrada"
+              "options": "Válvula entrada"
             },
             "properties": [
               {
@@ -2018,7 +2018,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  pump_low     AS \"Bomba baja\",\r\n  pump_high    AS \"Bomba alta\",\r\n  pump_inlet   AS \"Bomba entrada\",\r\n  pump_dose    AS \"Dosificaci\u00f3n\",\r\n  valve_flush  AS \"Flush\",\r\n  valve_inlet  AS \"V\u00e1lvula entrada\"\r\nFROM telemetry_outputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\r\n  pump_low     AS \"Bomba baja\",\r\n  pump_high    AS \"Bomba alta\",\r\n  pump_inlet   AS \"Bomba entrada\",\r\n  pump_dose    AS \"Dosificación\",\r\n  valve_flush  AS \"Flush\",\r\n  valve_inlet  AS \"Válvula entrada\"\r\nFROM telemetry_outputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
