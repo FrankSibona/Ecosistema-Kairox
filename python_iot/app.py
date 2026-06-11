@@ -270,6 +270,10 @@ BASELINE_FIELDS = [
 DIAG_SCORES = {
     "FAULT_NO_WATER":       95,
     "FAULT_SYSTEM":        100,
+    "FAULT_START_PRESSURE": 100,
+    "FAULT_LOW_FLOW":      100,
+    "FAULT_RECOVERY_LOW":  100,
+    "FAULT_RECOVERY_HIGH": 100,
     "NO_RAW_WATER":         90,
     "HIGH_PRESSURE":        90,
     "NO_PERMEATE_FLOW":     88,
@@ -285,6 +289,7 @@ DIAG_SCORES = {
     "LOW_PERMEATE_FLOW":    35,
     "LOW_PRESSURE":         35,
     "DECLINING_EFFICIENCY": 30,
+    "RESIDUAL_FLOW_STOPPED": 15,
 }
 
 IMMEDIATE_ALERT_CODES = {
@@ -299,6 +304,10 @@ PASSIVE_STATES = {"IDLE", "STOPPING", "FLUSHING"}
 # Pesos de riesgo por diagnóstico
 RISK_WEIGHTS = {
     "FAULT_SYSTEM":         100,
+    "FAULT_START_PRESSURE": 100,
+    "FAULT_LOW_FLOW":       100,
+    "FAULT_RECOVERY_LOW":   100,
+    "FAULT_RECOVERY_HIGH":  100,
     "FAULT_NO_WATER":       95,
     "NO_RAW_WATER":         90,
     "HIGH_PRESSURE":        85,
@@ -313,6 +322,7 @@ RISK_WEIGHTS = {
     "LOW_PRESSURE":         20,
     "FOULING_PROGRESSIVE":  35,  # tendencia
     "DECLINING_EFFICIENCY": 25,  # tendencia
+    "RESIDUAL_FLOW_STOPPED": 15,
 }
 
 def map_severity_to_health(severity: str) -> str:
@@ -1090,7 +1100,8 @@ class DiagnosticEngine:
 
         all_diags.extend(self._eval_events(state, inputs, process, device_id))
         if metrics:
-            all_diags.extend(self._eval_operational(metrics, process, thresh))
+            all_diags.extend(self._eval_operational(metrics, process, thresh, state))
+        all_diags.extend(self._eval_contextual(state, process))
         sensor_diag = self._check_sensor_invalid(process, metrics)
         if sensor_diag:
             all_diags.append(sensor_diag)
@@ -1122,8 +1133,10 @@ class DiagnosticEngine:
         results = []
 
         if state == "FAULT":
-            crudo = (inputs or {}).get("raw_water_ok", True)
-            retry = process.get("retry_count", 0)
+            crudo  = (inputs or {}).get("raw_water_ok", True)
+            retry  = tracker.get_retry_count(device_id)
+            reason = tracker.get_fault_reason(device_id)
+
             if not crudo:
                 results.append(DiagnosticResult(
                     "CRITICAL", "FAULT_NO_WATER",
@@ -1131,6 +1144,38 @@ class DiagnosticEngine:
                     "Verificar suministro de agua cruda, flotante del tanque y válvula de entrada.",
                     {"state": state, "raw_water_ok": False, "retry": retry},
                     score=DIAG_SCORES["FAULT_NO_WATER"], is_event=True,
+                ))
+            elif reason == "MAX_RETRIES":
+                results.append(DiagnosticResult(
+                    "CRITICAL", "FAULT_START_PRESSURE",
+                    f"FALLA AL ARRANCAR: presión de membrana no alcanzada tras {retry} reintentos.",
+                    "Verificar bomba de alta presión, válvulas de entrada/pressure switch y posibles obstrucciones.",
+                    {"state": state, "retry": retry, "fault_reason": reason},
+                    score=DIAG_SCORES["FAULT_START_PRESSURE"], is_event=True,
+                ))
+            elif reason == "FLOW_LOW":
+                results.append(DiagnosticResult(
+                    "CRITICAL", "FAULT_LOW_FLOW",
+                    "FALLA EN PRODUCCIÓN: caudal de permeado por debajo del mínimo.",
+                    "Verificar bomba de alta presión, posible obstrucción/fuga en membrana y sensor de caudal.",
+                    {"state": state, "retry": retry, "fault_reason": reason},
+                    score=DIAG_SCORES["FAULT_LOW_FLOW"], is_event=True,
+                ))
+            elif reason == "RECOVERY_LOW":
+                results.append(DiagnosticResult(
+                    "CRITICAL", "FAULT_RECOVERY_LOW",
+                    "FALLA EN PRODUCCIÓN: recovery por debajo del mínimo.",
+                    "Verificar fugas o derivación (bypass) en la membrana y caudal de rechazo.",
+                    {"state": state, "retry": retry, "fault_reason": reason},
+                    score=DIAG_SCORES["FAULT_RECOVERY_LOW"], is_event=True,
+                ))
+            elif reason == "RECOVERY_HIGH":
+                results.append(DiagnosticResult(
+                    "CRITICAL", "FAULT_RECOVERY_HIGH",
+                    "FALLA EN PRODUCCIÓN: recovery por encima del máximo.",
+                    "Verificar válvula de rechazo (posiblemente muy cerrada) y obstrucciones en la línea de rechazo.",
+                    {"state": state, "retry": retry, "fault_reason": reason},
+                    score=DIAG_SCORES["FAULT_RECOVERY_HIGH"], is_event=True,
                 ))
             else:
                 results.append(DiagnosticResult(
@@ -1171,13 +1216,21 @@ class DiagnosticEngine:
 
         return results
 
-    def _eval_operational(self, metrics, process, thresh) -> List[DiagnosticResult]:
+    def _eval_operational(self, metrics, process, thresh, state) -> List[DiagnosticResult]:
         results = []
         p_mem   = validate_float(process.get("pressure_membrane_bar"), 0, 50)
         flow_p  = metrics.get("flow_permeate_lpm")
         eff     = metrics.get("efficiency")
         rec     = metrics.get("recovery")
         delta_p = metrics.get("delta_pressure_bar")
+
+        # Diagnósticos basados en eficiencia/recovery/TDS solo son significativos
+        # con producción real y en régimen (PRODUCING). Con flujo ~0 (residual al
+        # detenerse, o rampa de arranque en STARTING) estos valores son ruido.
+        producing_steady = (
+            state == "PRODUCING" and
+            flow_p is not None and flow_p > THRESHOLDS["flow_permeate_min_lpm"]
+        )
 
         if p_mem is not None and p_mem > thresh["pressure_crit_high"]:
             results.append(DiagnosticResult(
@@ -1188,7 +1241,7 @@ class DiagnosticEngine:
                 score=DIAG_SCORES["HIGH_PRESSURE"], is_event=True,
             ))
 
-        if eff is not None and eff < thresh["efficiency_crit_low"]:
+        if producing_steady and eff is not None and eff < thresh["efficiency_crit_low"]:
             results.append(DiagnosticResult(
                 "CRITICAL", "CRITICAL_EFFICIENCY",
                 f"Eficiencia crítica: {eff*100:.1f}% (límite {thresh['efficiency_crit_low']*100:.0f}%).",
@@ -1197,7 +1250,8 @@ class DiagnosticEngine:
                 score=DIAG_SCORES["CRITICAL_EFFICIENCY"], is_event=True,
             ))
 
-        if (p_mem is not None and p_mem > thresh["pressure_warn_high"] * 0.85 and
+        if (producing_steady and
+                p_mem is not None and p_mem > thresh["pressure_warn_high"] * 0.85 and
                 flow_p is not None and flow_p < thresh["flow_permeate_warn_low"]):
             extra = {"delta_pressure_bar": delta_p} if delta_p and delta_p > 1.5 else {}
             results.append(DiagnosticResult(
@@ -1208,7 +1262,8 @@ class DiagnosticEngine:
                 score=DIAG_SCORES["MEMBRANE_FOULING"],
             ))
 
-        if (eff is not None and eff < thresh["efficiency_warn_low"] and
+        if (producing_steady and
+                eff is not None and eff < thresh["efficiency_warn_low"] and
                 rec is not None and rec > thresh["recovery_warn_high"]):
             results.append(DiagnosticResult(
                 "WARNING", "MEMBRANE_SCALING",
@@ -1218,7 +1273,8 @@ class DiagnosticEngine:
                 score=DIAG_SCORES["MEMBRANE_SCALING"],
             ))
 
-        if (eff is not None and eff < thresh["efficiency_warn_low"] and
+        if (producing_steady and
+                eff is not None and eff < thresh["efficiency_warn_low"] and
                 p_mem is not None and
                 THRESHOLDS["pressure_low_bar"] < p_mem < thresh["pressure_warn_high"] * 0.8):
             results.append(DiagnosticResult(
@@ -1229,7 +1285,7 @@ class DiagnosticEngine:
                 score=DIAG_SCORES["MEMBRANE_DEGRADED"],
             ))
 
-        if rec is not None and rec < thresh["recovery_warn_low"]:
+        if producing_steady and rec is not None and rec < thresh["recovery_warn_low"]:
             results.append(DiagnosticResult(
                 "WARNING", "LOW_RECOVERY",
                 f"Recovery bajo: {rec*100:.1f}%.",
@@ -1238,7 +1294,7 @@ class DiagnosticEngine:
                 score=DIAG_SCORES["LOW_RECOVERY"],
             ))
 
-        if eff is not None and eff < thresh["efficiency_warn_low"]:
+        if producing_steady and eff is not None and eff < thresh["efficiency_warn_low"]:
             results.append(DiagnosticResult(
                 "WARNING", "LOW_EFFICIENCY",
                 f"Eficiencia baja: {eff*100:.1f}%.",
@@ -1267,13 +1323,31 @@ class DiagnosticEngine:
 
         tds_out = metrics.get("tds_out_ppm")
         thr_tds = THRESHOLDS["tds_out_warn_ppm"]
-        if tds_out is not None and tds_out > thr_tds:
+        if producing_steady and tds_out is not None and tds_out > thr_tds:
             results.append(DiagnosticResult(
                 "WARNING", "HIGH_TDS_OUTPUT",
                 f"TDS salida elevado: {tds_out:.0f} ppm (umbral {thr_tds:.0f} ppm).",
                 "Verificar integridad de la membrana. Posible rotura o bypass.",
                 {"tds_out_ppm": tds_out, "threshold_ppm": thr_tds},
                 score=DIAG_SCORES["HIGH_TDS_OUTPUT"],
+            ))
+
+        return results
+
+    def _eval_contextual(self, state, process) -> List[DiagnosticResult]:
+        """Diagnósticos que dependen del estado FSM y datos físicos crudos,
+        independientes de KPIs derivados (metrics)."""
+        results = []
+        flow_reject = validate_float(process.get("flow_reject_lpm"), -0.1, 500.0)
+
+        if (state in ("IDLE", "STOPPING") and flow_reject is not None and
+                flow_reject > acfg.THRESH_RESIDUAL_FLOW_LPM):
+            results.append(DiagnosticResult(
+                "WARNING", "RESIDUAL_FLOW_STOPPED",
+                f"Flujo de rechazo residual con equipo detenido: {flow_reject:.2f} L/min.",
+                "Verificar fuga hidráulica o válvula de rechazo sin cerrar.",
+                {"flow_reject_lpm": flow_reject, "state": state},
+                score=DIAG_SCORES["RESIDUAL_FLOW_STOPPED"],
             ))
 
         return results
@@ -2098,6 +2172,7 @@ class MessageProcessor:
         event_diags    = [d for d in all_diags if d.is_event]
         slow_diags     = [d for d in all_diags if not d.is_event]
         confirmed_slow = hysteresis.update(device_id, [d.code for d in slow_diags])
+        confirmed_slow_diags = [d for d in slow_diags if d.code in confirmed_slow]
 
         final_root = DIAG_OK
         is_new     = False
@@ -2107,7 +2182,7 @@ class MessageProcessor:
             is_new     = True
         elif confirmed_slow:
             confirmed_diags = sorted(
-                [d for d in slow_diags if d.code in confirmed_slow],
+                confirmed_slow_diags,
                 key=lambda d: d.score, reverse=True
             )
             final_root = confirmed_diags[0]
@@ -2117,6 +2192,13 @@ class MessageProcessor:
             for other in confirmed_diags[1:]:
                 final_root.symptoms.update(other.evidence)
             is_new = hysteresis.is_new_confirmation(device_id, final_root.code)
+
+        # Hasta 2 diagnósticos secundarios (por score) para el panel "Factores detectados"
+        secondary = sorted(
+            (d for d in (event_diags + confirmed_slow_diags) if d.code != final_root.code),
+            key=lambda d: d.score, reverse=True
+        )
+        secondary_diag_codes = [d.code for d in secondary[:2]]
 
         # Persistir diagnóstico
         if final_root.severity != "OK":
@@ -2146,14 +2228,14 @@ class MessageProcessor:
                 last_severity, last_diag_code, last_diag_message, last_action,
                 flow_permeate_lpm, pressure_membrane_bar, recovery, efficiency,
                 health_status, health_code, health_message,
-                health_action, health_updated_at,
+                health_action, health_updated_at, secondary_diag_codes,
                 biz_liters_today, biz_target_liters, biz_fulfillment_pct,
                 biz_waste_liters_today, biz_waste_pct,
                 biz_risk_level, biz_risk_score,
                 biz_degradation_pct, biz_degradation_days, biz_degradation_label,
                 biz_health_age_hours)
                 VALUES (%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                        %s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,%s,
                         %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (device_id) DO UPDATE SET
                 last_seen          = EXCLUDED.last_seen,
@@ -2172,6 +2254,7 @@ class MessageProcessor:
                 health_message     = EXCLUDED.health_message,
                 health_action      = EXCLUDED.health_action,
                 health_updated_at  = EXCLUDED.health_updated_at,
+                secondary_diag_codes = EXCLUDED.secondary_diag_codes,
                 biz_liters_today       = COALESCE(EXCLUDED.biz_liters_today, device_status.biz_liters_today),
                 biz_target_liters      = COALESCE(EXCLUDED.biz_target_liters, device_status.biz_target_liters),
                 biz_fulfillment_pct    = COALESCE(EXCLUDED.biz_fulfillment_pct, device_status.biz_fulfillment_pct),
@@ -2205,6 +2288,7 @@ class MessageProcessor:
                     final_root.message,
                     final_root.action,
                     timestamp,
+                    json.dumps(secondary_diag_codes),
 
                     biz.get("liters_today"),
                     biz.get("target_liters"),

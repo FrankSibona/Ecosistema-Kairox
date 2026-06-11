@@ -33,6 +33,8 @@ THRESH_LOW_EFFICIENCY_RESOLVE = float(os.getenv("THRESH_LOW_EFFICIENCY_RESOLVE",
 THRESH_OFFLINE_SEC            = int(os.getenv("THRESH_OFFLINE_SEC",             "90"))      # seconds without telemetry → DEVICE_OFFLINE
 THRESH_OFFLINE_CHECK_SEC      = int(os.getenv("THRESH_OFFLINE_CHECK_SEC",       "30"))      # OfflineChecker loop interval
 
+THRESH_RESIDUAL_FLOW_LPM      = float(os.getenv("THRESH_RESIDUAL_FLOW_LPM",     "0.3"))     # L/min — flow_reject_lpm above this while IDLE/STOPPING → RESIDUAL_FLOW_STOPPED
+
 THRESH_REMINDER_SEC           = int(os.getenv("THRESH_REMINDER_SEC",            "3600"))    # re-notify interval while alert stays active
 
 # Physically impossible ranges — used for SENSOR_INVALID detection
@@ -71,6 +73,7 @@ RULE_CONFIG = {
     "NO_PERMEATE_FLOW": {"trigger_seconds": 0,   "clear_seconds": 30},  # NoFlowTracker already debounces
     "LOW_EFFICIENCY":   {"trigger_seconds": 60,  "clear_seconds": 120},
     "SENSOR_INVALID":   {"trigger_seconds": 10,  "clear_seconds": 30},
+    "RESIDUAL_FLOW_STOPPED": {"trigger_seconds": 60, "clear_seconds": 30},  # avoid normal post-stop depressurization (~10-30s)
 }
 _DEFAULT_RULE = {"trigger_seconds": 60, "clear_seconds": 120}
 

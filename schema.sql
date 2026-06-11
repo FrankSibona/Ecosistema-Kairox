@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS device_status (
     health_message          TEXT,
     health_action           TEXT,
     health_updated_at       TIMESTAMPTZ,
+    secondary_diag_codes    JSONB       DEFAULT '[]'::jsonb,
 
     -- ── MÉTRICAS DE NEGOCIO (nuevo en v3.3) ──────────────────
     -- Producción
@@ -461,3 +462,56 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_commands_one_active_per_device
 -- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS flow_factor_1   FLOAT DEFAULT 450.0;
 -- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS flow_factor_2   FLOAT DEFAULT 450.0;
 -- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds_temperature FLOAT DEFAULT 25.0;
+
+-- ============================================================
+-- MIGRACIÓN v3.4 → v3.5: panel "Diagnóstico" simplificado (operador)
+-- ============================================================
+
+-- device_status — hasta 2 códigos de diagnóstico secundario para el panel
+-- "Factores detectados" (cap=2 fijado en backend, ver DiagnosticEngine).
+ALTER TABLE device_status ADD COLUMN IF NOT EXISTS secondary_diag_codes JSONB DEFAULT '[]'::jsonb;
+
+-- ============================================================
+-- TABLA: diagnostic_catalog
+-- Traducción de códigos técnicos de diagnóstico a lenguaje operador,
+-- usada por Grafana vía JOIN. DiagnosticResult.message/.action (texto
+-- técnico) no se modifican — siguen alimentando diagnostics/alertas/AI.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS diagnostic_catalog (
+    code            TEXT PRIMARY KEY,
+    diagnostic_text TEXT NOT NULL,
+    action_text     TEXT NOT NULL
+);
+
+INSERT INTO diagnostic_catalog (code, diagnostic_text, action_text) VALUES
+  ('NORMAL',               'El equipo está funcionando correctamente.', 'No se requiere ninguna acción.'),
+  ('CRITICAL_EFFICIENCY',  'El rechazo de sales de la membrana está fuera de los parámetros esperados (eficiencia muy baja).', 'Inspeccionar la membrana: posible rotura o ensuciamiento severo.'),
+  ('LOW_EFFICIENCY',       'El rechazo de sales de la membrana bajó respecto de lo normal (eficiencia reducida).', 'Revisar la calidad del agua de entrada y el estado de la membrana.'),
+  ('LOW_RECOVERY',         'Se está desperdiciando más agua de lo normal.', 'Ajustar la válvula de rechazo para mejorar el aprovechamiento del agua.'),
+  ('HIGH_TDS_OUTPUT',      'La calidad del agua producida es baja.', 'Revisar el estado de la membrana: posible rotura o derivación (bypass).'),
+  ('MEMBRANE_FOULING',     'La membrana parece estar tapada o sucia.', 'Ejecutar un ciclo de limpieza (lavado). Si persiste, reemplazar la membrana.'),
+  ('MEMBRANE_SCALING',     'Hay indicios de incrustaciones (sarro) en la membrana.', 'Revisar dosificación de antiincrustante y programar limpieza química.'),
+  ('MEMBRANE_DEGRADED',    'La membrana muestra signos de desgaste.', 'Evaluar el reemplazo de la membrana.'),
+  ('LOW_PERMEATE_FLOW',    'El equipo está produciendo menos agua de lo normal.', 'Verificar la presión de entrada y el estado de la membrana.'),
+  ('LOW_PRESSURE',         'La presión del sistema es más baja de lo normal.', 'Verificar la bomba de alta presión y las válvulas.'),
+  ('HIGH_PRESSURE',        'La presión del sistema es más alta de lo seguro.', 'Detener el equipo y revisar la válvula de rechazo y la membrana.'),
+  ('NO_PERMEATE_FLOW',     'El equipo está encendido pero no está produciendo agua.', 'Revisar bomba de alta presión, válvula de permeado y membrana.'),
+  ('NO_RAW_WATER',         'Falta agua de alimentación mientras el equipo intenta funcionar.', 'Verificar el tanque de agua cruda y el sensor de nivel.'),
+  ('FAULT_NO_WATER',       'El equipo no puede arrancar: falta agua de alimentación.', 'Verificar suministro de agua, nivel del tanque y válvula de entrada.'),
+  ('FAULT_SYSTEM',         'El equipo se detuvo por una falla y no pudo reiniciar solo.', 'Reiniciar el equipo. Si la falla persiste, contactar a mantenimiento.'),
+  ('SENSOR_INVALID',       'Hay una lectura de sensor que no parece correcta.', 'Revisar conexión y calibración de sensores.'),
+  ('RESIDUAL_FLOW_STOPPED','Flujo detectado con el equipo detenido.', 'Posible fuga hidráulica o válvula que no cerró. Verificar tuberías y válvulas en los próximos minutos.')
+ON CONFLICT (code) DO NOTHING;
+
+-- ============================================================
+-- MIGRACIÓN v3.5 → v3.6: causas específicas de FAULT (fault_reason)
+-- ============================================================
+-- El firmware ya publica fault_reason (MAX_RETRIES/FLOW_LOW/RECOVERY_LOW/
+-- RECOVERY_HIGH) en el tópico "state". DiagnosticEngine._eval_events ahora
+-- emite un código específico por causa en lugar de FAULT_SYSTEM genérico.
+INSERT INTO diagnostic_catalog (code, diagnostic_text, action_text) VALUES
+  ('FAULT_START_PRESSURE', 'El equipo no logró alcanzar la presión de membrana al arrancar, tras varios intentos.', 'Revisar la bomba de alta presión, las válvulas de entrada y el pressure switch. Verificar posibles obstrucciones.'),
+  ('FAULT_LOW_FLOW',       'El equipo se detuvo durante la producción por caudal de permeado bajo.', 'Revisar la bomba de alta presión, posibles obstrucciones o fugas en la membrana, y el sensor de caudal.'),
+  ('FAULT_RECOVERY_LOW',   'El equipo se detuvo: produce menos agua de la esperada en relación al agua de entrada (posible fuga o derivación).', 'Revisar fugas o derivación (bypass) en la membrana y el caudal de rechazo.'),
+  ('FAULT_RECOVERY_HIGH',  'El equipo se detuvo: produce más agua de la esperada en relación al agua de entrada (posible obstrucción en el rechazo).', 'Revisar la válvula de rechazo (puede estar muy cerrada) y posibles obstrucciones en la línea de rechazo.')
+ON CONFLICT (code) DO NOTHING;
