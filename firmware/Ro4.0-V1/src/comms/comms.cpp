@@ -130,11 +130,11 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 // ================= CONFIG =================
 
-const char* mqtt_server = "159.112.132.176";
-const int mqtt_port = 1883;
+const char* mqtt_server = MQTT_BROKER;
+const int mqtt_port = MQTT_PORT;
 
-const char* mqtt_user = "kairox";
-const char* mqtt_pass = "admin0102";
+const char* mqtt_user = MQTT_USER;
+const char* mqtt_pass = MQTT_PASS;
 
 const char* fw_version = "1.1.0";
 

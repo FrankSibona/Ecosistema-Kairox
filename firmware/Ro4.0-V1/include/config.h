@@ -76,8 +76,8 @@
 // ================= MQTT =================
 #define MQTT_BROKER "159.112.132.176"
 #define MQTT_PORT 1883
-#define MQTT_USER "fyntek"
-#define MQTT_PASS "dlgfyntek0912"
+#define MQTT_USER "kairox"
+#define MQTT_PASS "admin0102"
 
 #define DEVICE_ID "osmosis_01"
 

@@ -10,3 +10,11 @@ pgdata/
 nginx_data/logs/
 *.log
 *.gz
+
+# Credenciales y backups locales de mosquitto
+mosquitto/config/passwd
+mosquitto/backups/
+
+# Cache de Python
+__pycache__/
+*.pyc
