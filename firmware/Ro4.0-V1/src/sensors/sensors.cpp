@@ -333,11 +333,19 @@ void Sensors::update() {
     d5 = digitalRead(PIN_D5);
     d6 = digitalRead(PIN_D6);
 
-    // ── Flow (1 Hz window) ────────────────────────────────────────────────────
-    // Pulses accumulated by ISR in 1 second.
-    // flow_lpm = (pulses_per_sec * 60) / flow_factor_N
+    // ── Flow (~1 Hz window) ───────────────────────────────────────────────────
+    // Pulses accumulated by ISR since lastFlowTime.
+    // flow_lpm = (pulses * 60000) / (dt_ms * flow_factor_N)
     // where flow_factor = pulses/liter (sensor datasheet spec).
+    //
+    // dt_ms real (no se asume 1000ms fijo): si el loop se retrasa (p.ej.
+    // reconexión WiFi/MQTT bloqueante), los pulsos acumulados corresponden a
+    // una ventana >1s. Dividir por dt_ms real evita picos espurios de
+    // flow1/flow2 (~Nx) al resumir tras un gap.
     if (millis() - lastFlowTime >= 1000) {
+        unsigned long now_ms = millis();
+        unsigned long dt_ms  = now_ms - lastFlowTime;
+
         noInterrupts();
         unsigned long p1 = pulsesQ1;
         unsigned long p2 = pulsesQ2;
@@ -347,13 +355,16 @@ void Sensors::update() {
 
         last_pulses1 = p1;
         last_pulses2 = p2;
-        flow1 = (p1 * 60.0f) / _cfg.flow_factor_1;
-        flow2 = (p2 * 60.0f) / _cfg.flow_factor_2;
 
-        totalPerm += flow1 / 60.0f;
-        totalRech += flow2 / 60.0f;
+        // Volumen acumulado: litros reales de esta ventana, independiente de dt_ms.
+        totalPerm += p1 / _cfg.flow_factor_1;
+        totalRech += p2 / _cfg.flow_factor_2;
 
-        lastFlowTime = millis();
+        // Caudal instantáneo normalizado al dt real.
+        flow1 = (p1 * 60000.0f) / (dt_ms * _cfg.flow_factor_1);
+        flow2 = (p2 * 60000.0f) / (dt_ms * _cfg.flow_factor_2);
+
+        lastFlowTime = now_ms;
     }
 
     // ── Volume persistence (smart save) ──────────────────────────────────────
