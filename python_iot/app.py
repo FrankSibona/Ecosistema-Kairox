@@ -2977,7 +2977,8 @@ def get_config(device_id):
         "target_efficiency,daily_target_liters,friendly_name,location,"
         "flow_factor_1,flow_factor_2,tds_temperature,"
         "min_flow_lpm,max_flow_lpm,flow_fault_delay_sec,"
-        "min_recovery_pct,max_recovery_pct,recovery_fault_delay_sec "
+        "min_recovery_pct,max_recovery_pct,recovery_fault_delay_sec,"
+        "tds1_cal_slope,tds1_cal_offset,tds2_cal_slope,tds2_cal_offset "
         "FROM device_config WHERE device_id=%s",
         (device_id,)
     )
@@ -2995,6 +2996,8 @@ def get_config(device_id):
         "flow_fault_delay_sec":     r[13],
         "min_recovery_pct":         r[14], "max_recovery_pct":      r[15],
         "recovery_fault_delay_sec": r[16],
+        "tds1_cal_slope":           r[17], "tds1_cal_offset":       r[18],
+        "tds2_cal_slope":           r[19], "tds2_cal_offset":       r[20],
     })
 
 @api.route("/api/config/<device_id>", methods=["POST"])
@@ -3009,6 +3012,10 @@ def set_config(device_id):
     min_rec       = float(data.get("min_recovery_pct",          10.0))
     max_rec       = float(data.get("max_recovery_pct",          85.0))
     rec_delay     = int(  data.get("recovery_fault_delay_sec",   60))
+    tds1_cal_slope  = float(data.get("tds1_cal_slope",  0.0))
+    tds1_cal_offset = float(data.get("tds1_cal_offset", 0.0))
+    tds2_cal_slope  = float(data.get("tds2_cal_slope",  0.0))
+    tds2_cal_offset = float(data.get("tds2_cal_offset", 0.0))
     db.execute(
         "INSERT INTO device_config "
         "(device_id,pump_power_kw,cost_kwh,cost_water_m3,"
@@ -3016,8 +3023,9 @@ def set_config(device_id):
         "flow_factor_1,flow_factor_2,tds_temperature,"
         "min_flow_lpm,max_flow_lpm,flow_fault_delay_sec,"
         "min_recovery_pct,max_recovery_pct,recovery_fault_delay_sec,"
+        "tds1_cal_slope,tds1_cal_offset,tds2_cal_slope,tds2_cal_offset,"
         "friendly_name,location,updated_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
         "ON CONFLICT (device_id) DO UPDATE SET "
         "pump_power_kw=EXCLUDED.pump_power_kw, cost_kwh=EXCLUDED.cost_kwh, "
         "cost_water_m3=EXCLUDED.cost_water_m3, target_recovery=EXCLUDED.target_recovery, "
@@ -3029,6 +3037,8 @@ def set_config(device_id):
         "flow_fault_delay_sec=EXCLUDED.flow_fault_delay_sec, "
         "min_recovery_pct=EXCLUDED.min_recovery_pct, max_recovery_pct=EXCLUDED.max_recovery_pct, "
         "recovery_fault_delay_sec=EXCLUDED.recovery_fault_delay_sec, "
+        "tds1_cal_slope=EXCLUDED.tds1_cal_slope, tds1_cal_offset=EXCLUDED.tds1_cal_offset, "
+        "tds2_cal_slope=EXCLUDED.tds2_cal_slope, tds2_cal_offset=EXCLUDED.tds2_cal_offset, "
         "friendly_name=EXCLUDED.friendly_name, location=EXCLUDED.location, updated_at=NOW()",
         (device_id,
          data.get("pump_power_kw", 0.75),     data.get("cost_kwh", 0.12),
@@ -3037,17 +3047,21 @@ def set_config(device_id):
          ff1, ff2, tds_t,
          min_flow, max_flow, flow_delay,
          min_rec, max_rec, rec_delay,
+         tds1_cal_slope, tds1_cal_offset, tds2_cal_slope, tds2_cal_offset,
          data.get("friendly_name", ""),       data.get("location", "")),
     )
     KPIEngine.invalidate_config(device_id)
     _publish_device_config(device_id, ff1, ff2, tds_t,
                            min_flow, max_flow, flow_delay,
-                           min_rec, max_rec, rec_delay)
+                           min_rec, max_rec, rec_delay,
+                           tds1_cal_slope, tds1_cal_offset,
+                           tds2_cal_slope, tds2_cal_offset)
     alert_manager.fire_event(
         device_id, "CONFIG_UPDATED",
         f"Config actualizada: ff1={ff1} ff2={ff2} tds_t={tds_t} "
         f"min_flow={min_flow} max_flow={max_flow} flow_delay={flow_delay}s "
-        f"min_rec={min_rec}% max_rec={max_rec}% rec_delay={rec_delay}s",
+        f"min_rec={min_rec}% max_rec={max_rec}% rec_delay={rec_delay}s "
+        f"tds1_cal={tds1_cal_slope}/{tds1_cal_offset} tds2_cal={tds2_cal_slope}/{tds2_cal_offset}",
         cooldown_sec=60,
     )
     return jsonify({"status": "ok"})
@@ -3058,12 +3072,18 @@ def _publish_device_config(
     ff1: float, ff2: float, tds_t: float,
     min_flow: float = 0.2, max_flow: float = 20.0, flow_delay: int = 30,
     min_rec: float = 10.0, max_rec: float = 85.0, rec_delay: int = 60,
+    tds1_cal_slope: float = 0.0, tds1_cal_offset: float = 0.0,
+    tds2_cal_slope: float = 0.0, tds2_cal_offset: float = 0.0,
 ):
     """Publish retained sensor config + process protections to the device via MQTT.
 
     Retained so the device receives it immediately on reconnect.
     updated_at is the canonical version field — firmware applies only if newer.
     Missing fields in payload fall back to firmware current config (safe partial update).
+
+    tds{1,2}_cal_slope == 0.0 → firmware sin calibración cargada, usa el
+    polinomio DFRobot de fallback (voltageToPpm). > 0.0 activa calibración
+    lineal por canal (ppm = slope * mV + offset).
     """
     if not mqtt_client:
         return
@@ -3079,12 +3099,17 @@ def _publish_device_config(
         "min_recovery_pct":         min_rec,
         "max_recovery_pct":         max_rec,
         "recovery_fault_delay_sec": rec_delay,
+        "tds1_cal_slope":           tds1_cal_slope,
+        "tds1_cal_offset":          tds1_cal_offset,
+        "tds2_cal_slope":           tds2_cal_slope,
+        "tds2_cal_offset":          tds2_cal_offset,
         "updated_at":               int(_time.time()),
     })
     mqtt_client.publish(f"fyntek/{device_id}/config", payload, retain=True)
     log.info(f"[{device_id}] Config MQTT publicada: ff1={ff1} ff2={ff2} tds_t={tds_t} "
              f"min_flow={min_flow} max_flow={max_flow} flow_delay={flow_delay}s "
-             f"min_rec={min_rec}% max_rec={max_rec}% rec_delay={rec_delay}s")
+             f"min_rec={min_rec}% max_rec={max_rec}% rec_delay={rec_delay}s "
+             f"tds1_cal={tds1_cal_slope}/{tds1_cal_offset} tds2_cal={tds2_cal_slope}/{tds2_cal_offset}")
 
 @api.route("/api/baseline/<device_id>", methods=["GET"])
 def get_baseline(device_id):
@@ -3905,6 +3930,23 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
       <label>Temperatura TDS (°C)</label>
       <input type="number" id="tds-t" step="0.5" min="0" max="80" placeholder="25">
     </div>
+    <div class="cfg-section">Calibración TDS (slope=0 → sin calibrar, usa fórmula DFRobot)</div>
+    <div class="cfg-field">
+      <label>TDS1 slope (ppm/mV)</label>
+      <input type="number" id="tds1-cal-sl" step="0.001" min="0" max="10" placeholder="0">
+    </div>
+    <div class="cfg-field">
+      <label>TDS1 offset (ppm)</label>
+      <input type="number" id="tds1-cal-of" step="0.1" min="-500" max="500" placeholder="0">
+    </div>
+    <div class="cfg-field">
+      <label>TDS2 slope (ppm/mV)</label>
+      <input type="number" id="tds2-cal-sl" step="0.001" min="0" max="10" placeholder="0">
+    </div>
+    <div class="cfg-field">
+      <label>TDS2 offset (ppm)</label>
+      <input type="number" id="tds2-cal-of" step="0.1" min="-500" max="500" placeholder="0">
+    </div>
     <div class="cfg-section">Protección de caudal permeado</div>
     <div class="cfg-field">
       <label>Caudal mínimo (L/min)</label>
@@ -4182,6 +4224,10 @@ async function loadConfig(){
     document.getElementById('ff1').value       = c.flow_factor_1            ?? '';
     document.getElementById('ff2').value       = c.flow_factor_2            ?? '';
     document.getElementById('tds-t').value     = c.tds_temperature          ?? '';
+    document.getElementById('tds1-cal-sl').value = c.tds1_cal_slope         ?? '';
+    document.getElementById('tds1-cal-of').value = c.tds1_cal_offset        ?? '';
+    document.getElementById('tds2-cal-sl').value = c.tds2_cal_slope         ?? '';
+    document.getElementById('tds2-cal-of').value = c.tds2_cal_offset        ?? '';
     document.getElementById('min-flow').value  = c.min_flow_lpm             ?? '';
     document.getElementById('flow-delay').value= c.flow_fault_delay_sec     ?? '';
     document.getElementById('min-rec').value   = c.min_recovery_pct         ?? '';
@@ -4200,6 +4246,10 @@ async function saveConfig(){
     flow_factor_1:            parseFloat(document.getElementById('ff1').value)        || 450,
     flow_factor_2:            parseFloat(document.getElementById('ff2').value)        || 450,
     tds_temperature:          parseFloat(document.getElementById('tds-t').value)      || 25,
+    tds1_cal_slope:           parseFloat(document.getElementById('tds1-cal-sl').value) || 0,
+    tds1_cal_offset:          parseFloat(document.getElementById('tds1-cal-of').value) || 0,
+    tds2_cal_slope:           parseFloat(document.getElementById('tds2-cal-sl').value) || 0,
+    tds2_cal_offset:          parseFloat(document.getElementById('tds2-cal-of').value) || 0,
     min_flow_lpm:             parseFloat(document.getElementById('min-flow').value)   || 0.2,
     flow_fault_delay_sec:     parseInt(document.getElementById('flow-delay').value)   || 30,
     min_recovery_pct:         parseFloat(document.getElementById('min-rec').value)    || 10,
@@ -4413,6 +4463,10 @@ def main():
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS min_recovery_pct        FLOAT   DEFAULT 10.0")
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS max_recovery_pct        FLOAT   DEFAULT 85.0")
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS recovery_fault_delay_sec INTEGER DEFAULT 60")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds1_cal_slope  FLOAT DEFAULT 0.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds1_cal_offset FLOAT DEFAULT 0.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds2_cal_slope  FLOAT DEFAULT 0.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds2_cal_offset FLOAT DEFAULT 0.0")
     log.info("✅ Schema migrations aplicadas")
 
     # Pre-populate tracker from DB so panels show correct state after restart

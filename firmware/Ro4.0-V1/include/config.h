@@ -36,6 +36,16 @@
 #define FLOW_FACTOR_DEFAULT     450.0f
 #define TDS_TEMPERATURE_DEFAULT  25.0f  // °C — compensación térmica TDS (nominal)
 
+// ── Calibración TDS voltaje→ppm (capa reemplazable) ──────────────────────────
+// slope == 0.0f  → sin calibración cargada: fallback a voltageToPpm() (polinomio
+//                  DFRobot). Estado por defecto de fábrica / equipos sin tocar.
+// slope >  0.0f  → CAL_MODE_LINEAR: ppm = slope * mV + offset.
+// Actualizable por canal/dispositivo vía MQTT fyntek/{device_id}/config.
+#define TDS1_CAL_SLOPE_DEFAULT   0.0f
+#define TDS1_CAL_OFFSET_DEFAULT  0.0f
+#define TDS2_CAL_SLOPE_DEFAULT   0.0f
+#define TDS2_CAL_OFFSET_DEFAULT  0.0f
+
 // ── Protecciones de proceso (configurables vía MQTT/Flask) ───────────────────
 #define MIN_FLOW_LPM_DEFAULT          0.2f   // L/min — mínimo permeado en PRODUCING
 #define MAX_FLOW_LPM_DEFAULT         20.0f   // L/min — máximo permeado (reservado)

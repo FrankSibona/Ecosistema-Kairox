@@ -178,6 +178,12 @@ CREATE TABLE IF NOT EXISTS device_config (
     flow_factor_1           FLOAT       DEFAULT 450.0,  -- pulsos/litro caudalímetro permeado
     flow_factor_2           FLOAT       DEFAULT 450.0,  -- pulsos/litro caudalímetro rechazo
     tds_temperature         FLOAT       DEFAULT 25.0,   -- °C para compensación temperatura TDS
+    -- Calibración TDS voltaje→ppm (CAL_MODE_LINEAR). slope=0 → sin calibrar,
+    -- firmware usa fallback voltageToPpm() (polinomio DFRobot).
+    tds1_cal_slope          FLOAT       DEFAULT 0.0,    -- ppm/mV — canal TDS1
+    tds1_cal_offset         FLOAT       DEFAULT 0.0,    -- ppm — canal TDS1
+    tds2_cal_slope          FLOAT       DEFAULT 0.0,    -- ppm/mV — canal TDS2
+    tds2_cal_offset         FLOAT       DEFAULT 0.0,    -- ppm — canal TDS2
     -- ── PROCESS PROTECTIONS ──────────────────────────────────────────────────
     min_flow_lpm            FLOAT       DEFAULT 0.2,    -- L/min mínimo en PRODUCING → FLOW_LOW
     max_flow_lpm            FLOAT       DEFAULT 20.0,   -- L/min máximo en PRODUCING (reservado)
@@ -515,3 +521,15 @@ INSERT INTO diagnostic_catalog (code, diagnostic_text, action_text) VALUES
   ('FAULT_RECOVERY_LOW',   'El equipo se detuvo: produce menos agua de la esperada en relación al agua de entrada (posible fuga o derivación).', 'Revisar fugas o derivación (bypass) en la membrana y el caudal de rechazo.'),
   ('FAULT_RECOVERY_HIGH',  'El equipo se detuvo: produce más agua de la esperada en relación al agua de entrada (posible obstrucción en el rechazo).', 'Revisar la válvula de rechazo (puede estar muy cerrada) y posibles obstrucciones en la línea de rechazo.')
 ON CONFLICT (code) DO NOTHING;
+
+-- ============================================================
+-- MIGRACIÓN v3.6 → v3.7: calibración TDS configurable por canal
+-- ============================================================
+-- Infraestructura de calibración voltaje→ppm reemplazable (CAL_MODE_LINEAR),
+-- por dispositivo y por canal (TDS1/TDS2). slope=0 (default) → firmware usa
+-- el polinomio DFRobot como fallback (sin cambio de comportamiento hasta que
+-- se cargue una calibración real vía /api/config).
+-- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds1_cal_slope  FLOAT DEFAULT 0.0;
+-- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds1_cal_offset FLOAT DEFAULT 0.0;
+-- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds2_cal_slope  FLOAT DEFAULT 0.0;
+-- ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds2_cal_offset FLOAT DEFAULT 0.0;

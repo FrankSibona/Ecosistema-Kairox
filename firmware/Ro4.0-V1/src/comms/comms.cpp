@@ -75,7 +75,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strcmp(topic, cfg_topic) == 0) {
         if (!s_sensors) return;
 
-        StaticJsonDocument<256> doc;
+        StaticJsonDocument<384> doc;
         DeserializationError err = deserializeJson(doc, payload, length);
         if (err) {
             Serial.print("[CFG] JSON inválido: ");
@@ -89,6 +89,10 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         incoming.flow_factor_1             = doc["flow_factor_1"]             | cur.flow_factor_1;
         incoming.flow_factor_2             = doc["flow_factor_2"]             | cur.flow_factor_2;
         incoming.tds_temperature           = doc["tds_temperature"]           | cur.tds_temperature;
+        incoming.tds1_cal_slope            = doc["tds1_cal_slope"]            | cur.tds1_cal_slope;
+        incoming.tds1_cal_offset           = doc["tds1_cal_offset"]           | cur.tds1_cal_offset;
+        incoming.tds2_cal_slope            = doc["tds2_cal_slope"]            | cur.tds2_cal_slope;
+        incoming.tds2_cal_offset           = doc["tds2_cal_offset"]           | cur.tds2_cal_offset;
         incoming.min_flow_lpm              = doc["min_flow_lpm"]              | cur.min_flow_lpm;
         incoming.max_flow_lpm              = doc["max_flow_lpm"]              | cur.max_flow_lpm;
         incoming.flow_fault_delay_sec      = doc["flow_fault_delay_sec"]      | cur.flow_fault_delay_sec;

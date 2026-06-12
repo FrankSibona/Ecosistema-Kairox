@@ -19,6 +19,12 @@ struct SensorConfig {
     float         flow_factor_1   = FLOW_FACTOR_DEFAULT;   // pulsos/litro — caudalímetro permeado
     float         flow_factor_2   = FLOW_FACTOR_DEFAULT;   // pulsos/litro — caudalímetro rechazo
     float         tds_temperature = TDS_TEMPERATURE_DEFAULT; // °C — compensación térmica TDS
+    // ── Calibración TDS voltaje→ppm, por canal (CAL_MODE_LINEAR) ─────────────
+    // slope == 0 → sin calibración cargada, fallback a voltageToPpm() (DFRobot).
+    float         tds1_cal_slope  = TDS1_CAL_SLOPE_DEFAULT;
+    float         tds1_cal_offset = TDS1_CAL_OFFSET_DEFAULT;
+    float         tds2_cal_slope  = TDS2_CAL_SLOPE_DEFAULT;
+    float         tds2_cal_offset = TDS2_CAL_OFFSET_DEFAULT;
     // ── Protecciones de proceso ──────────────────────────────────────────────
     float         min_flow_lpm              = MIN_FLOW_LPM_DEFAULT;
     float         max_flow_lpm              = MAX_FLOW_LPM_DEFAULT;
@@ -122,7 +128,18 @@ private:
     void saveConfig();
 
     static bool  isValidConfig(const SensorConfig& c);
+
+    // Legacy fallback: DFRobot SEN0244 polynomial. Used when no per-channel
+    // calibration is loaded (slope == 0).
     static float voltageToPpm(float voltage, float temperature);
+
+    // Calibration layer (voltage → ppm). Currently implements:
+    //   - CAL_MODE_LINEAR (slope > 0): ppm = slope * mV + offset
+    //   - CAL_MODE_LEGACY (slope == 0): voltageToPpm() fallback
+    // Future modes (CAL_MODE_POLYNOMIAL, CAL_MODE_LOOKUP_TABLE) plug in here
+    // without touching callers or the NVS/MQTT/backend config plumbing.
+    static float calibrateTdsPpm(float voltage, float temperature, float slope, float offset);
+
     static float median5(const float* buf);
 
     static void IRAM_ATTR isrQ1();

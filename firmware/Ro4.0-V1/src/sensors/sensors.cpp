@@ -58,6 +58,10 @@ void Sensors::loadConfig() {
     loaded.flow_factor_1             = p.getFloat ("ff1",    FLOW_FACTOR_DEFAULT);
     loaded.flow_factor_2             = p.getFloat ("ff2",    FLOW_FACTOR_DEFAULT);
     loaded.tds_temperature           = p.getFloat ("tds_t",  TDS_TEMPERATURE_DEFAULT);
+    loaded.tds1_cal_slope             = p.getFloat ("t1_sl",  TDS1_CAL_SLOPE_DEFAULT);
+    loaded.tds1_cal_offset            = p.getFloat ("t1_of",  TDS1_CAL_OFFSET_DEFAULT);
+    loaded.tds2_cal_slope             = p.getFloat ("t2_sl",  TDS2_CAL_SLOPE_DEFAULT);
+    loaded.tds2_cal_offset            = p.getFloat ("t2_of",  TDS2_CAL_OFFSET_DEFAULT);
     loaded.min_flow_lpm              = p.getFloat ("min_fl", MIN_FLOW_LPM_DEFAULT);
     loaded.max_flow_lpm              = p.getFloat ("max_fl", MAX_FLOW_LPM_DEFAULT);
     loaded.flow_fault_delay_sec      = p.getUInt  ("flt_d",  FLOW_FAULT_DELAY_SEC_DEFAULT);
@@ -75,9 +79,12 @@ void Sensors::loadConfig() {
 
     _cfg = loaded;
     Serial.printf("[CFG] Cargado: ff1=%.1f ff2=%.1f tds_t=%.1f "
+                  "tds1_cal=%.4f/%.2f tds2_cal=%.4f/%.2f "
                   "min_fl=%.2f max_fl=%.1f flt_d=%u "
                   "min_rec=%.1f max_rec=%.1f rec_d=%u ts=%lu\n",
                   _cfg.flow_factor_1, _cfg.flow_factor_2, _cfg.tds_temperature,
+                  _cfg.tds1_cal_slope, _cfg.tds1_cal_offset,
+                  _cfg.tds2_cal_slope, _cfg.tds2_cal_offset,
                   _cfg.min_flow_lpm, _cfg.max_flow_lpm, _cfg.flow_fault_delay_sec,
                   _cfg.min_recovery_pct, _cfg.max_recovery_pct,
                   _cfg.recovery_fault_delay_sec, _cfg.updated_at);
@@ -91,6 +98,10 @@ void Sensors::saveConfig() {
     p.putFloat("ff1",     _cfg.flow_factor_1);
     p.putFloat("ff2",     _cfg.flow_factor_2);
     p.putFloat("tds_t",   _cfg.tds_temperature);
+    p.putFloat("t1_sl",   _cfg.tds1_cal_slope);
+    p.putFloat("t1_of",   _cfg.tds1_cal_offset);
+    p.putFloat("t2_sl",   _cfg.tds2_cal_slope);
+    p.putFloat("t2_of",   _cfg.tds2_cal_offset);
     p.putFloat("min_fl",  _cfg.min_flow_lpm);
     p.putFloat("max_fl",  _cfg.max_flow_lpm);
     p.putUInt ("flt_d",   _cfg.flow_fault_delay_sec);
@@ -115,6 +126,10 @@ bool Sensors::isValidConfig(const SensorConfig& c) {
     return inRange(c.flow_factor_1,       10.0f, 5000.0f)
         && inRange(c.flow_factor_2,       10.0f, 5000.0f)
         && inRange(c.tds_temperature,      0.0f,   80.0f)
+        && inRange(c.tds1_cal_slope,       0.0f,   10.0f)   // 0 = sin calibración (fallback)
+        && inRange(c.tds1_cal_offset,   -500.0f,  500.0f)
+        && inRange(c.tds2_cal_slope,       0.0f,   10.0f)
+        && inRange(c.tds2_cal_offset,   -500.0f,  500.0f)
         && inRange(c.min_flow_lpm,         0.0f,   50.0f)
         && inRange(c.max_flow_lpm,         0.1f,  100.0f)
         && c.flow_fault_delay_sec >= 5  && c.flow_fault_delay_sec <= 300
@@ -140,9 +155,12 @@ bool Sensors::setConfig(const SensorConfig& incoming) {
     _cfg = incoming;
     saveConfig();
     Serial.printf("[CFG] APLICADA: ff1=%.1f ff2=%.1f tds_t=%.1f "
+                  "tds1_cal=%.4f/%.2f tds2_cal=%.4f/%.2f "
                   "min_fl=%.2f max_fl=%.1f flt_d=%u "
                   "min_rec=%.1f max_rec=%.1f rec_d=%u ts=%lu\n",
                   _cfg.flow_factor_1, _cfg.flow_factor_2, _cfg.tds_temperature,
+                  _cfg.tds1_cal_slope, _cfg.tds1_cal_offset,
+                  _cfg.tds2_cal_slope, _cfg.tds2_cal_offset,
                   _cfg.min_flow_lpm, _cfg.max_flow_lpm, _cfg.flow_fault_delay_sec,
                   _cfg.min_recovery_pct, _cfg.max_recovery_pct,
                   _cfg.recovery_fault_delay_sec, _cfg.updated_at);
@@ -181,6 +199,28 @@ float Sensors::voltageToPpm(float voltage, float temperature) {
     float coeff = 1.0f + 0.02f * (temperature - 25.0f);
     float v     = voltage / coeff;
     float ppm   = (133.42f * v * v * v - 255.86f * v * v + 857.39f * v) * 0.5f;
+    return ppm < 0.0f ? 0.0f : ppm;
+}
+
+// ── Calibration layer (voltage → ppm) ─────────────────────────────────────────
+// Replaceable per-channel calibration, configurable via NVS/MQTT (no reflash).
+//
+//   slope == 0.0f → CAL_MODE_LEGACY: sin calibración cargada, usa voltageToPpm()
+//                    (polinomio DFRobot). Estado de fábrica / equipos no calibrados.
+//   slope >  0.0f → CAL_MODE_LINEAR: ppm = slope * mV + offset, con la misma
+//                    compensación térmica que el polinomio (coeff = 1+0.02*(T-25)).
+//
+// Futuro: CAL_MODE_POLYNOMIAL / CAL_MODE_LOOKUP_TABLE se agregan como nuevas
+// ramas aquí, sin tocar update()/begin() ni la capa NVS/MQTT/backend.
+float Sensors::calibrateTdsPpm(float voltage, float temperature, float slope, float offset) {
+    if (slope <= 0.0f) {
+        return voltageToPpm(voltage, temperature);  // CAL_MODE_LEGACY
+    }
+    // CAL_MODE_LINEAR
+    if (voltage < 0.0f) voltage = 0.0f;
+    float coeff = 1.0f + 0.02f * (temperature - 25.0f);
+    float mv    = (voltage / coeff) * 1000.0f;
+    float ppm   = slope * mv + offset;
     return ppm < 0.0f ? 0.0f : ppm;
 }
 
@@ -239,8 +279,8 @@ void Sensors::begin() {
     float v2 = tds2_mv_raw / 1000.0f;
     for (int i = 0; i < TDS_BUF; i++) { tds1_buf[i] = v1; tds2_buf[i] = v2; }
     tds1_v   = v1;   tds2_v   = v2;
-    tds1_ppm = voltageToPpm(v1, _cfg.tds_temperature);
-    tds2_ppm = voltageToPpm(v2, _cfg.tds_temperature);
+    tds1_ppm = calibrateTdsPpm(v1, _cfg.tds_temperature, _cfg.tds1_cal_slope, _cfg.tds1_cal_offset);
+    tds2_ppm = calibrateTdsPpm(v2, _cfg.tds_temperature, _cfg.tds2_cal_slope, _cfg.tds2_cal_offset);
 
     // ── ADC burst diagnostic — 100 samples, min/max/avg. Remove after investigation.
     // Note: analogRead() and analogReadMilliVolts() perform SEPARATE conversions —
@@ -351,8 +391,8 @@ void Sensors::update() {
 
     tds1_v   = median5(tds1_buf);
     tds2_v   = median5(tds2_buf);
-    tds1_ppm = voltageToPpm(tds1_v, _cfg.tds_temperature);
-    tds2_ppm = voltageToPpm(tds2_v, _cfg.tds_temperature);
+    tds1_ppm = calibrateTdsPpm(tds1_v, _cfg.tds_temperature, _cfg.tds1_cal_slope, _cfg.tds1_cal_offset);
+    tds2_ppm = calibrateTdsPpm(tds2_v, _cfg.tds_temperature, _cfg.tds2_cal_slope, _cfg.tds2_cal_offset);
 
     // Debug — rate-limited to 1 Hz. Remove after TDS investigation.
     static unsigned long lastTdsLog = 0;
