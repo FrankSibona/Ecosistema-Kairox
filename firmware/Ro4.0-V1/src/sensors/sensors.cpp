@@ -216,10 +216,16 @@ void Sensors::begin() {
     attachInterrupt(digitalPinToInterrupt(PIN_Q1), isrQ1, RISING);
     attachInterrupt(digitalPinToInterrupt(PIN_Q2), isrQ2, RISING);
 
-    // ADC_11db: 0–3.1V input range — covers SEN0244 output (0–2.3V) fully.
+    // ADC_11db: 0–3.1V input range — default, usado por PIN_AIN0/AIN1 (presión, 0.5–4.5V).
+    // ADC_0db:  0–~950mV — override solo en TDS1/TDS2 (mejor resolución posible,
+    // ~0.23mV/cuenta). SEN0244 en agua de ósmosis mide ~14mV — por debajo del
+    // piso de no-linealidad del ADC (~100mV) en cualquier atenuación; este
+    // cambio es para confirmarlo empíricamente vía el burst de diagnóstico.
     // analogReadMilliVolts() applies ESP32 factory ADC calibration.
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
+    analogSetPinAttenuation(PIN_TDS1, ADC_0db);
+    analogSetPinAttenuation(PIN_TDS2, ADC_0db);
 
     loadTotals();
     loadConfig();
@@ -238,9 +244,11 @@ void Sensors::begin() {
 
     // ── ADC burst diagnostic — 100 samples, min/max/avg. Remove after investigation.
     // Note: analogRead() and analogReadMilliVolts() perform SEPARATE conversions —
-    // they do not share a sample. esp_adc_cal returns ~142mV for raw=0 (curve intercept).
-    // ADC_11db floor: voltages below ~150mV produce raw=0 regardless of actual voltage.
-    // Expected raw scale (3100mV full scale): 70mV≈92  142mV≈188  280mV≈370
+    // they do not share a sample. esp_adc_cal returns a non-zero mV for raw=0
+    // (curve intercept) — voltages below the ADC's minimum measurable input
+    // produce raw=0 regardless of actual voltage. TDS1/TDS2 now run at ADC_0db
+    // (~950mV full scale, ~0.23mV/cuenta) — usar este burst para medir agua de
+    // ósmosis (~14mV reales) y verificar si el piso bajó respecto a 11db/6db.
     {
         const int N = 100;
         long  s1r = 0, s1m = 0, s2r = 0, s2m = 0;
@@ -262,9 +270,8 @@ void Sensors::begin() {
         }
 
         Serial.println("[ADC_DIAG] ========================================");
-        Serial.printf ("[ADC_DIAG] Atten: ADC_11db  Res: 12-bit  N=%d samples\n", N);
-        Serial.printf ("[ADC_DIAG] Scale: 3100mV/4095cnt  "
-                       "70mV~=92raw  142mV~=188raw  280mV~=370raw\n");
+        Serial.printf ("[ADC_DIAG] Atten: ADC_0db (TDS1/TDS2)  Res: 12-bit  N=%d samples\n", N);
+        Serial.printf ("[ADC_DIAG] Scale: ~950mV/4095cnt (~0.23mV/cnt)\n");
         Serial.printf ("[ADC_DIAG] GPIO%d TDS1  raw: avg=%4ld min=%4d max=%4d  "
                        "mv: avg=%4ld min=%4d max=%4d\n",
                        PIN_TDS1, s1r/N, mn1r, mx1r, s1m/N, mn1m, mx1m);
