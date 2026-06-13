@@ -1,10 +1,11 @@
-#include <esp_task_wdt.h>
+#pragma once
 
-void watchdogInit(){
-    esp_task_wdt_init(5,true);
-    esp_task_wdt_add(NULL);
-}
+// Watchdog hardware (ESP32 Task WDT) — única red de seguridad ante cuelgues
+// reales (deadlock, bucle infinito, bloqueo de librería). Alimentar
+// SOLO desde el loop principal con watchdogReset().
+void watchdogInit();
+void watchdogReset();
 
-void watchdogReset(){
-    esp_task_wdt_reset();
-}
+// Imprime por Serial la causa del último reinicio (esp_reset_reason) —
+// diagnóstico de campo: distingue power-on normal de panic/task-wdt/etc.
+void logResetReason();

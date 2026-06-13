@@ -112,10 +112,24 @@
 #define MQTT_USER "kairox"
 #define MQTT_PASS "admin0102"
 
+// Timeout de socket para mqttClient.connect()/publish() — default de
+// PubSubClient es 15s, demasiado largo: mantiene el loop principal
+// bloqueado ante un broker inalcanzable. Acotado para que el FSM y el
+// resto de comms.update() sigan respondiendo.
+#define MQTT_SOCKET_TIMEOUT_SEC 3U
+
 // Portal cautivo de configuración (solo si NO hay credenciales WiFi guardadas).
 // Acotado para no bloquear el arranque del FSM indefinidamente — si nadie
 // configura WiFi en este tiempo, el equipo arranca offline igual.
 #define WIFI_PORTAL_TIMEOUT_SEC 180U
+
+// ================= WATCHDOG =================
+// Task watchdog del ESP32 — red de seguridad ante cuelgues reales (deadlock,
+// bucle infinito, bloqueo de librería). 30s es deliberadamente holgado para
+// no interferir con operación normal ni con conectividad degradada — solo
+// debe disparar ante un loop() que deja de iterar por completo.
+// Se alimenta únicamente desde el loop principal (ver main.cpp).
+#define WATCHDOG_TIMEOUT_SEC 30U
 
 #define DEVICE_ID "osmosis_01"
 

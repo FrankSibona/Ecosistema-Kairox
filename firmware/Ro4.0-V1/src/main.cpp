@@ -5,6 +5,7 @@
 #include "commands/commands.h"
 #include "diag/diag_mode.h"
 #include "diag/flight_recorder.h"
+#include "safety/watchdog.h"
 
 Sensors       sensors;
 Control       control;
@@ -15,6 +16,9 @@ FlightRecorder flightRec;
 
 void setup() {
     Serial.begin(115200);
+
+    logResetReason();
+    watchdogInit();
 
     sensors.begin();
     control.begin();
@@ -48,4 +52,7 @@ void loop() {
 
     // 5. Pequeño respiro al CPU (IMPORTANTE)
     delay(10);
+
+    // 6. Watchdog — única señal de "estoy vivo". Alimentar SOLO aquí.
+    watchdogReset();
 }

@@ -154,7 +154,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "1.1.3";
+const char* fw_version = "1.1.4";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -195,8 +195,9 @@ String getDeviceID() {
 // ================= HELPERS =================
 
 long getTimestamp() {
+    if (!ntpConfigured) return 0;
     struct tm timeinfo;
-    if (!getLocalTime(&timeinfo)) return 0;
+    if (!getLocalTime(&timeinfo, 10)) return 0;  // 10ms — no bloquea el loop
     return mktime(&timeinfo);
 }
 
@@ -323,6 +324,7 @@ void Comms::begin(Commands &cmds, Sensors &s, DiagMode &diag, FlightRecorder &fr
     s_flightrec = &fr;
     mqttClient.setServer(mqtt_server, mqtt_port);
     mqttClient.setBufferSize(4096);
+    mqttClient.setSocketTimeout(MQTT_SOCKET_TIMEOUT_SEC);
     mqttClient.setCallback(mqttCallback);
 }
 
