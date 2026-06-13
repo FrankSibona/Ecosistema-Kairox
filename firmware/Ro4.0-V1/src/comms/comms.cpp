@@ -154,7 +154,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "1.1.2";
+const char* fw_version = "1.1.3";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -171,6 +171,11 @@ PubSubClient mqttClient(espClient);
 
 unsigned long lastWifiCheck = 0;
 unsigned long lastMqttReconnect = 0;
+
+// true una vez que configTime() fue llamado tras la primera conexión WiFi.
+// Permite disparar la sincronización NTP también cuando la conexión se
+// establece en background (fuera de setupWiFi()).
+bool ntpConfigured = false;
 
 unsigned long lastProcess = 0;
 unsigned long lastQuality = 0;
@@ -241,18 +246,31 @@ static void publishInputs(Sensors& s, long ts) {
 
 // ================= WIFI =================
 
+// No bloqueante para el FSM: si hay credenciales guardadas, se intenta
+// conectar en background (WiFi.begin() no bloquea) y setup() continúa de
+// inmediato — Comms::update() reintenta vía WiFi.reconnect(). El FSM
+// (control.update()) no depende de WiFi/MQTT para operar.
+//
+// Solo en el primer arranque (sin credenciales guardadas) se abre el portal
+// cautivo de configuración, con timeout acotado (WIFI_PORTAL_TIMEOUT_SEC) —
+// si nadie configura WiFi en ese plazo, el equipo arranca offline igual.
 void setupWiFi() {
     WiFi.mode(WIFI_STA);
 
-    if (!wm.autoConnect("FYNTEK_SETUP")) {
-        Serial.println("❌ No WiFi → restart");
-        delay(3000);
-        ESP.restart();
+    if (wm.getWiFiIsSaved()) {
+        WiFi.begin();
+        Serial.println("[WIFI] Conectando en background (credenciales guardadas)...");
+        return;
     }
 
-    Serial.println("✅ WiFi conectado");
-
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_SEC);
+    if (wm.autoConnect("FYNTEK_SETUP")) {
+        Serial.println("✅ WiFi conectado");
+        configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+        ntpConfigured = true;
+    } else {
+        Serial.println("⚠ Portal de configuración expiró sin WiFi — arrancando offline");
+    }
 }
 
 // ================= MQTT =================
@@ -363,6 +381,11 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
         if (WiFi.status() != WL_CONNECTED) {
             Serial.println("[COMMS] WiFi reconectando...");
             WiFi.reconnect();
+            ntpConfigured = false;
+        } else if (!ntpConfigured) {
+            configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+            ntpConfigured = true;
+            Serial.println("✅ WiFi conectado — NTP sincronizado");
         }
     }
 

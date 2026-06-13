@@ -112,6 +112,11 @@
 #define MQTT_USER "kairox"
 #define MQTT_PASS "admin0102"
 
+// Portal cautivo de configuración (solo si NO hay credenciales WiFi guardadas).
+// Acotado para no bloquear el arranque del FSM indefinidamente — si nadie
+// configura WiFi en este tiempo, el equipo arranca offline igual.
+#define WIFI_PORTAL_TIMEOUT_SEC 180U
+
 #define DEVICE_ID "osmosis_01"
 
 #define TOPIC_STATE   "fyntek/osmosis_01/state"
