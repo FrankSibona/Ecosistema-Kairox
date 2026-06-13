@@ -117,6 +117,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import alert_config as acfg
+import io_catalog
 from collections import deque, defaultdict
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional, Dict, List, Any
@@ -3298,6 +3299,80 @@ def _publish_device_config(
              f"pm_lim={pm_lim} pm_hi={pm_hi}bar p_fdly={p_fdly}s "
              f"pb_en={pb_en} pb_cal=({pb_minv}-{pb_maxv}V→{pb_minb}-{pb_maxb}bar)")
 
+
+# ============================================================
+# IO MAP — capa de abstracción Pin <-> Señal lógica (ver io_catalog.py)
+# ============================================================
+
+@api.route("/api/iomap/<device_id>", methods=["GET"])
+def get_iomap(device_id):
+    rows = db.fetchall(
+        "SELECT io_map, features FROM devices WHERE device_id=%s",
+        (device_id,)
+    )
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+    stored_io_map, stored_features = rows[0]
+    return jsonify({
+        "io_map":   io_catalog.merge_io_map(stored_io_map),
+        "features": io_catalog.merge_features(stored_features),
+        "catalog": {
+            "inputs":        io_catalog.LOGICAL_INPUTS,
+            "outputs":       io_catalog.LOGICAL_OUTPUTS,
+            "features":      list(io_catalog.DEFAULT_FEATURES.keys()),
+            "input_labels":  io_catalog.INPUT_LABELS,
+            "output_labels": io_catalog.OUTPUT_LABELS,
+            "feature_labels": io_catalog.FEATURE_LABELS,
+        },
+    })
+
+
+@api.route("/api/iomap/<device_id>", methods=["POST"])
+def set_iomap(device_id):
+    rows = db.fetchall("SELECT 1 FROM devices WHERE device_id=%s", (device_id,))
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    io_map   = io_catalog.validate_io_map(data.get("io_map") or {})
+    features = io_catalog.validate_features(data.get("features") or {})
+
+    db.execute(
+        "UPDATE devices SET io_map=%s, features=%s WHERE device_id=%s",
+        (json.dumps(io_map), json.dumps(features), device_id),
+    )
+    _publish_device_iomap(device_id, io_catalog.merge_io_map(io_map))
+    alert_manager.fire_event(
+        device_id, "IOMAP_UPDATED",
+        f"Mapeo de E/S actualizado: {len(io_map['inputs'])} entradas, "
+        f"{len(io_map['outputs'])} salidas configuradas",
+        cooldown_sec=60,
+    )
+    return jsonify({"status": "ok"})
+
+
+def _publish_device_iomap(device_id: str, io_map: dict):
+    """Publish retained io_map (Pin<->Señal lógica, catálogo completo) to the
+    device via MQTT.
+
+    Retained so the device receives it immediately on reconnect.
+    updated_at es el version field — el firmware aplica solo si es mayor al
+    actual (mismo patrón que _publish_device_config). Claves de señal
+    desconocidas para el firmware son ignoradas; señales ausentes en el
+    payload conservan su valor actual en el dispositivo (partial update).
+    """
+    if not mqtt_client:
+        return
+    import json as _json
+    import time as _time
+    payload = _json.dumps({
+        "inputs":     io_map["inputs"],
+        "outputs":    io_map["outputs"],
+        "updated_at": int(_time.time()),
+    })
+    mqtt_client.publish(f"fyntek/{device_id}/iomap", payload, retain=True)
+    log.info(f"[{device_id}] IO map MQTT publicado (retained)")
+
 @api.route("/api/baseline/<device_id>", methods=["GET"])
 def get_baseline(device_id):
     cols = []
@@ -4063,6 +4138,13 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
 .alert-msg{font-size:.7rem;color:#94a3b8;margin-top:.1rem;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .alert-time{font-size:.62rem;color:#334155;margin-top:.1rem}
+.iomap-table{width:100%;border-collapse:collapse;margin-bottom:1rem;font-size:.78rem}
+.iomap-table th{text-align:left;font-size:.62rem;text-transform:uppercase;letter-spacing:.06em;
+  color:#475569;padding:.3rem .5rem;border-bottom:1px solid #2d3348}
+.iomap-table td{padding:.3rem .5rem;border-bottom:1px solid #1a1f2e;vertical-align:middle}
+.iomap-table select{margin-bottom:0;width:100%}
+.iomap-table .iomap-chk{text-align:center;width:4.5rem}
+.iomap-table .iomap-chk input{accent-color:#7c3aed;cursor:pointer}
 </style>
 </head>
 <body>
@@ -4259,6 +4341,27 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
 </div>
 
 <div class="card">
+  <div class="card-title">Mapeo de E/S (avanzado)</div>
+  <p class="hint">Asigna pines físicos a señales lógicas y habilita features del equipo.
+  No cambia el comportamiento actual del equipo — requiere FW ≥ 1.1.5 para sincronizar.</p>
+  <div class="cfg-section">Entradas digitales</div>
+  <table class="iomap-table">
+    <thead><tr><th>Señal</th><th>GPIO</th><th>Modo</th><th>Invertir</th></tr></thead>
+    <tbody id="iomap-inputs"></tbody>
+  </table>
+  <div class="cfg-section">Salidas digitales</div>
+  <table class="iomap-table">
+    <thead><tr><th>Señal</th><th>GPIO</th><th>Invertir</th></tr></thead>
+    <tbody id="iomap-outputs"></tbody>
+  </table>
+  <div class="cfg-section">Features del dispositivo</div>
+  <div class="cfg-grid" id="iomap-features"></div>
+  <button onclick="saveIomap()" style="background:#7c3aed;color:#fff;width:100%;padding:.75rem">
+    Guardar mapeo de E/S
+  </button>
+</div>
+
+<div class="card">
   <div class="card-title">Respuesta</div>
   <div class="rbox" id="resp">—</div>
 </div>
@@ -4344,6 +4447,7 @@ function onDevChange(){
   poll();
   pollAi();
   loadConfig();
+  loadIomap();
   fetchAlerts();
 }
 
@@ -4590,9 +4694,109 @@ async function saveConfig(){
   }
 }
 
+let IOMAP_CATALOG = null;
+
+function gpioOptionsHtml(selected){
+  let html = '<option value=""'+(selected==null?' selected':'')+'>— sin asignar —</option>';
+  for(let g=0; g<=39; g++){
+    html += '<option value="'+g+'"'+(selected===g?' selected':'')+'>GPIO '+g+'</option>';
+  }
+  return html;
+}
+
+async function loadIomap(){
+  try {
+    const r = await fetch('/api/iomap/'+dev());
+    if(!r.ok) return;
+    const c = await r.json();
+    IOMAP_CATALOG = c.catalog;
+
+    const inBody = document.getElementById('iomap-inputs');
+    inBody.innerHTML = '';
+    for(const sig of c.catalog.inputs){
+      const e = c.io_map.inputs[sig] || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>'+(c.catalog.input_labels[sig]||sig)+'</td>'+
+        '<td><select id="io-in-'+sig+'-gpio">'+gpioOptionsHtml(e.gpio)+'</select></td>'+
+        '<td><select id="io-in-'+sig+'-mode">'+
+          '<option value="pullup"'+(e.mode==='pulldown'?'':' selected')+'>Pull-up</option>'+
+          '<option value="pulldown"'+(e.mode==='pulldown'?' selected':'')+'>Pull-down</option>'+
+        '</select></td>'+
+        '<td class="iomap-chk"><input type="checkbox" id="io-in-'+sig+'-inv"'+(e.invert?' checked':'')+'></td>';
+      inBody.appendChild(tr);
+    }
+
+    const outBody = document.getElementById('iomap-outputs');
+    outBody.innerHTML = '';
+    for(const sig of c.catalog.outputs){
+      const e = c.io_map.outputs[sig] || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>'+(c.catalog.output_labels[sig]||sig)+'</td>'+
+        '<td><select id="io-out-'+sig+'-gpio">'+gpioOptionsHtml(e.gpio)+'</select></td>'+
+        '<td class="iomap-chk"><input type="checkbox" id="io-out-'+sig+'-inv"'+(e.invert?' checked':'')+'></td>';
+      outBody.appendChild(tr);
+    }
+
+    const featDiv = document.getElementById('iomap-features');
+    featDiv.innerHTML = '';
+    for(const f of c.catalog.features){
+      const div = document.createElement('div');
+      div.className = 'cfg-field cfg-check';
+      div.innerHTML =
+        '<label>'+(c.catalog.feature_labels[f]||f)+'</label>'+
+        '<input type="checkbox" id="io-feat-'+f+'"'+(c.features[f]?' checked':'')+'>';
+      featDiv.appendChild(div);
+    }
+  } catch(e){}
+}
+
+async function saveIomap(){
+  const box = document.getElementById('resp');
+  box.className = 'rbox'; box.textContent = 'Guardando mapeo de E/S...';
+  if(!IOMAP_CATALOG){ box.className='rbox er'; box.textContent='Catálogo no cargado'; return; }
+
+  const io_map = {inputs:{}, outputs:{}};
+  for(const sig of IOMAP_CATALOG.inputs){
+    const g = document.getElementById('io-in-'+sig+'-gpio').value;
+    io_map.inputs[sig] = {
+      gpio:   g===''? null : parseInt(g),
+      mode:   document.getElementById('io-in-'+sig+'-mode').value,
+      invert: document.getElementById('io-in-'+sig+'-inv').checked ? 1 : 0,
+    };
+  }
+  for(const sig of IOMAP_CATALOG.outputs){
+    const g = document.getElementById('io-out-'+sig+'-gpio').value;
+    io_map.outputs[sig] = {
+      gpio:   g===''? null : parseInt(g),
+      invert: document.getElementById('io-out-'+sig+'-inv').checked ? 1 : 0,
+    };
+  }
+  const features = {};
+  for(const f of IOMAP_CATALOG.features){
+    features[f] = document.getElementById('io-feat-'+f).checked;
+  }
+
+  try {
+    const r = await fetch('/api/iomap/'+dev(), {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({io_map, features})
+    });
+    const data = await r.json();
+    box.className   = 'rbox '+(r.ok?'ok':'er');
+    box.textContent = JSON.stringify(data, null, 2);
+  } catch(e){
+    box.className   = 'rbox er';
+    box.textContent = 'Error: '+e.message;
+  }
+}
+
 setInterval(poll, 5000);
 poll();
 loadConfig();
+loadIomap();
 fetchAlerts();
 
 // ── AI Integration ──────────────────────────────────────────────────────────
@@ -4810,6 +5014,9 @@ def main():
     db.execute("ALTER TABLE device_status ADD COLUMN IF NOT EXISTS pressure_membrane_voltage FLOAT")
     db.execute("ALTER TABLE device_status ADD COLUMN IF NOT EXISTS pressure_brine_voltage    FLOAT")
     db.execute("ALTER TABLE device_status ADD COLUMN IF NOT EXISTS delta_p_bar               FLOAT")
+    # Capa de abstracción Pin<->Señal lógica + features por dispositivo (ver io_catalog.py)
+    db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS io_map   JSONB DEFAULT '{}'::jsonb")
+    db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS features JSONB DEFAULT '{}'::jsonb")
     log.info("✅ Schema migrations aplicadas")
 
     # Pre-populate tracker from DB so panels show correct state after restart

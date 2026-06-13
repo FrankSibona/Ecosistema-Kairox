@@ -166,7 +166,17 @@ CREATE TABLE IF NOT EXISTS devices (
     telegram_chat_id    TEXT,
     registered_at       TIMESTAMPTZ DEFAULT NOW(),
     fw_version          TEXT,
-    notes               TEXT
+    notes               TEXT,
+    -- Capa de abstracción Pin<->Señal lógica (ver python_iot/io_catalog.py).
+    -- io_map: {"inputs":{<señal>:{"gpio":int|null,"mode":"pullup"|"pulldown","invert":0|1}},
+    --          "outputs":{<señal>:{"gpio":int|null,"invert":0|1}}}
+    -- Solo entradas presentes sobreescriben los defaults — merge_io_map()
+    -- completa el resto. Sincronizado con firmware vía MQTT retained
+    -- fyntek/{device_id}/iomap (NVS "kx_iomap").
+    io_map              JSONB       DEFAULT '{}'::jsonb,
+    -- Features configurables por dispositivo (booleanos). Sin impacto en
+    -- FSM en esta fase — preparados para futuras variantes hidráulicas.
+    features            JSONB       DEFAULT '{}'::jsonb
 );
 
 -- ============================================================
