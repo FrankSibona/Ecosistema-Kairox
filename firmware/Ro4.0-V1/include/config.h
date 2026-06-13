@@ -86,6 +86,14 @@
 #define CFG_MAGIC    0x4B524F58U   // 'K','R','O','X' — identifies KAIROX config block
 #define CFG_VERSION  1U            // increment on struct layout changes
 
+// ── NVS io_map integrity ──────────────────────────────────────────────────────
+// IOMAP_MAGIC/IOMAP_VERSION cubren el blob del mapeo Pin<->Señal lógica en NVS
+// namespace "kx_iomap" (ver src/io/io_map.h). Mismo patrón que CFG_MAGIC/
+// CFG_VERSION: si no coinciden, se descarta lo guardado y se usa el mapeo por
+// defecto (reproduce el wiring actual D1-D6/R1-R6, ver defaultIOMap()).
+#define IOMAP_MAGIC   0x4B584D41U  // 'K','X','M','A' — identifica el blob io_map
+#define IOMAP_VERSION 1U           // incrementar ante cambios de catálogo/struct
+
 // ================= FSM =================
 #define LOW_PUMP_FILL_TIME   10000
 #define PRESSURE_CHECK_TIME   5000

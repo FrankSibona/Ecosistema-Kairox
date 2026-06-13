@@ -6,6 +6,7 @@
 #include "diag/diag_mode.h"
 #include "diag/flight_recorder.h"
 #include "safety/watchdog.h"
+#include "io/io_map.h"
 
 Sensors       sensors;
 Control       control;
@@ -22,6 +23,7 @@ void setup() {
 
     sensors.begin();
     control.begin();
+    ioMapInit();  // carga mapeo Pin<->Señal desde NVS — sin efectos sobre GPIO
     commands.begin();
     comms.begin(commands, sensors, diagMode, flightRec);
 

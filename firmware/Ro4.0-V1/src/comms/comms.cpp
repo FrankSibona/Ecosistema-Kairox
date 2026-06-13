@@ -12,6 +12,8 @@
 #include "../commands/commands.h"
 #include "../diag/diag_mode.h"
 #include "../diag/flight_recorder.h"
+#include "../io/io_map.h"
+#include "../io/io_catalog.h"
 #include <config.h>
 
 // ================= DEVICE ID =================
@@ -38,6 +40,30 @@ static const char* receiveResultName(ReceiveResult r) {
         case ReceiveResult::UNKNOWN_COMMAND: return "UNKNOWN_COMMAND";
         default:                             return "UNKNOWN";
     }
+}
+
+// Aplica un objeto JSON {"gpio":.., "mode":.., "invert":..} sobre el
+// IOPinConfig actual (partial update por campo):
+//   - "gpio" ausente   -> conserva el gpio actual
+//   - "gpio": null     -> IOMAP_GPIO_NONE (señal sin pin asignado)
+//   - "gpio": <num>    -> ese GPIO
+//   - "mode" solo aplica si hasMode (inputs); valores desconocidos se ignoran
+//   - "invert" ausente -> conserva el valor actual
+static IOPinConfig parseIOEntry(JsonObject obj, const IOPinConfig& cur, bool hasMode) {
+    IOPinConfig out = cur;
+    if (obj.containsKey("gpio")) {
+        JsonVariant g = obj["gpio"];
+        out.gpio = g.isNull() ? IOMAP_GPIO_NONE : (uint8_t)g.as<unsigned int>();
+    }
+    if (hasMode && obj.containsKey("mode")) {
+        const char* m = obj["mode"] | "";
+        if      (strcmp(m, "pulldown") == 0) out.mode = IOMAP_MODE_PULLDOWN;
+        else if (strcmp(m, "pullup")   == 0) out.mode = IOMAP_MODE_PULLUP;
+    }
+    if (obj.containsKey("invert")) {
+        out.invert = (obj["invert"].as<int>() != 0) ? 1 : 0;
+    }
+    return out;
 }
 
 // Free function required by PubSubClient. Dispatches to one of three handlers:
@@ -119,6 +145,45 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
+    // ── /iomap ───────────────────────────────────────────────────────────────
+    // Retained: mapeo Pin<->Señal lógica (capa de abstracción de hardware).
+    // Solo persistencia en NVS — no produce cambios de comportamiento en
+    // Sensors/Control en esta fase. Partial update por señal: claves
+    // ausentes conservan el valor actual de esa señal.
+    char iomap_topic[68];
+    snprintf(iomap_topic, sizeof(iomap_topic), "fyntek/%s/iomap", device_id.c_str());
+    if (strcmp(topic, iomap_topic) == 0) {
+        StaticJsonDocument<2048> doc;
+        DeserializationError err = deserializeJson(doc, payload, length);
+        if (err) {
+            Serial.print("[IOMAP] JSON inválido: ");
+            Serial.println(err.c_str());
+            return;
+        }
+
+        IOMapConfig incoming = ioMapGet();
+
+        JsonObject inObj = doc["inputs"].as<JsonObject>();
+        for (JsonPair kv : inObj) {
+            LogicalInput sig = logicalInputFromName(kv.key().c_str());
+            if (sig == LogicalInput::COUNT) continue;
+            uint8_t idx = (uint8_t)sig;
+            incoming.inputs[idx] = parseIOEntry(kv.value().as<JsonObject>(), incoming.inputs[idx], true);
+        }
+
+        JsonObject outObj = doc["outputs"].as<JsonObject>();
+        for (JsonPair kv : outObj) {
+            LogicalOutput sig = logicalOutputFromName(kv.key().c_str());
+            if (sig == LogicalOutput::COUNT) continue;
+            uint8_t idx = (uint8_t)sig;
+            incoming.outputs[idx] = parseIOEntry(kv.value().as<JsonObject>(), incoming.outputs[idx], false);
+        }
+
+        incoming.updated_at = doc["updated_at"] | (uint32_t)0;
+        ioMapSet(incoming);
+        return;
+    }
+
     // ── /diag/ctrl ───────────────────────────────────────────────────────────
     char diag_topic[72];
     snprintf(diag_topic, sizeof(diag_topic), "fyntek/%s/diag/ctrl", device_id.c_str());
@@ -154,7 +219,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "1.1.4";
+const char* fw_version = "1.1.5";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -294,6 +359,7 @@ void Comms::reconnect() {
         mqttClient.subscribe(baseTopic("cmd").c_str());
         mqttClient.subscribe(baseTopic("config").c_str());
         mqttClient.subscribe(baseTopic("config/reset").c_str());
+        mqttClient.subscribe(baseTopic("iomap").c_str());
         mqttClient.subscribe(baseTopic("diag/ctrl").c_str());
         mqttClient.subscribe(baseTopic("diag/flightrec/get").c_str());
 
