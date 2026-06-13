@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <math.h>  // NAN
 #include <config.h>
 
 // ── Sensor calibration config ────────────────────────────────────────────────
@@ -32,6 +33,22 @@ struct SensorConfig {
     float         min_recovery_pct          = MIN_RECOVERY_PCT_DEFAULT;
     float         max_recovery_pct          = MAX_RECOVERY_PCT_DEFAULT;
     uint32_t      recovery_fault_delay_sec  = RECOVERY_FAULT_DELAY_SEC_DEFAULT;
+    // ── Calibración de presión (voltaje→bar), por canal ──────────────────────
+    // *_enabled=0 (default): pressure_membrane_bar/pressure_brine_bar usan la
+    // fórmula legacy (sin cambios). *_enabled=1: calibración lineal min/max.
+    uint8_t       pressure_membrane_enabled        = PRESSURE_MEMBRANE_ENABLED_DEFAULT;
+    float         pressure_membrane_min_voltage    = PRESSURE_MEMBRANE_MIN_VOLTAGE_DEFAULT;
+    float         pressure_membrane_max_voltage    = PRESSURE_MEMBRANE_MAX_VOLTAGE_DEFAULT;
+    float         pressure_membrane_min_bar        = PRESSURE_MEMBRANE_MIN_BAR_DEFAULT;
+    float         pressure_membrane_max_bar        = PRESSURE_MEMBRANE_MAX_BAR_DEFAULT;
+    uint8_t       pressure_membrane_limits_enabled = PRESSURE_MEMBRANE_LIMITS_ENABLED_DEFAULT;
+    float         pressure_membrane_high_limit     = PRESSURE_MEMBRANE_HIGH_LIMIT_DEFAULT;
+    uint32_t      pressure_fault_delay_sec         = PRESSURE_FAULT_DELAY_SEC_DEFAULT;
+    uint8_t       pressure_brine_enabled           = PRESSURE_BRINE_ENABLED_DEFAULT;
+    float         pressure_brine_min_voltage       = PRESSURE_BRINE_MIN_VOLTAGE_DEFAULT;
+    float         pressure_brine_max_voltage       = PRESSURE_BRINE_MAX_VOLTAGE_DEFAULT;
+    float         pressure_brine_min_bar           = PRESSURE_BRINE_MIN_BAR_DEFAULT;
+    float         pressure_brine_max_bar           = PRESSURE_BRINE_MAX_BAR_DEFAULT;
     // ────────────────────────────────────────────────────────────────────────
     unsigned long updated_at      = 0;                     // unix timestamp del último update
 };
@@ -46,6 +63,16 @@ public:
     float getFlow2();
     float getPressure1();
     float getPressure2();
+
+    // Pressure: filtered channel voltage (V), siempre calculado (independiente
+    // de *_enabled). Útil para calibración y diagnóstico.
+    float getPressureMembraneVoltage();
+    float getPressureBrineVoltage();
+
+    // delta_p_bar = pressure_membrane_bar - pressure_brine_bar.
+    // NAN si pressure_membrane_enabled o pressure_brine_enabled es false
+    // (no se publica un valor artificial).
+    float getDeltaPBar();
 
     float getTDS1Voltage();   // V, calibrated
     float getTDS2Voltage();
@@ -140,6 +167,9 @@ private:
     // without touching callers or the NVS/MQTT/backend config plumbing.
     static float calibrateTdsPpm(float voltage, float temperature, float slope, float offset);
 
+    // Calibración lineal genérica voltaje→valor físico, usada para presión.
+    static float calibrateLinear(float v, float v_min, float v_max, float y_min, float y_max);
+
     static float median5(const float* buf);
 
     static void IRAM_ATTR isrQ1();
@@ -149,8 +179,12 @@ private:
 
     unsigned long lastFlowTime = 0;
 
-    // Pressure EWMA
+    // Pressure EWMA (legacy bar, usado cuando *_enabled=false)
     float p1_f = 0, p2_f = 0;
+    // Pressure: filtered channel voltage (V), siempre activo
+    float pm_v_f = 0, pb_v_f = 0;
+    // delta_p_bar — NAN si no ambos canales habilitados
+    float dp_bar = NAN;
     int   p1_adc = 0, p2_adc = 0;          // raw ADC counts for pressure channels
     unsigned long last_pulses1 = 0, last_pulses2 = 0;  // pulses in last 1 s window
 

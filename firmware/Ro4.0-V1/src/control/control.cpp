@@ -54,6 +54,7 @@ const char* Control::getFaultReasonName() {
         case FaultReason::FLOW_LOW:      return "FLOW_LOW";
         case FaultReason::RECOVERY_LOW:  return "RECOVERY_LOW";
         case FaultReason::RECOVERY_HIGH: return "RECOVERY_HIGH";
+        case FaultReason::PRESSURE_MEMBRANE_HIGH: return "PRESSURE_MEMBRANE_HIGH";
         default:                         return "";
     }
 }
@@ -191,6 +192,7 @@ void Control::update(Sensors &s, Commands &cmds) {
 
             if (!crudoOK) {
                 Serial.println("[FAULT] Sin agua de crudo");
+                pMembraneHighArmed = false;
                 state = IDLE;
                 break;
             }
@@ -208,10 +210,13 @@ void Control::update(Sensors &s, Commands &cmds) {
                 } else {
                     retryCount++;
                     Serial.println("[FAULT] Presión no alcanzada");
+                    pMembraneHighArmed = false;
                     state = IDLE;
                     retryTimer = millis();
                 }
             }
+
+            checkMembraneHighPressure(s);
             break;
 
         case PRODUCING:
@@ -222,6 +227,7 @@ void Control::update(Sensors &s, Commands &cmds) {
                 // Reset protection timers on clean exit — no fault condition
                 flowFaultArmed     = false;
                 recoveryFaultArmed = false;
+                pMembraneHighArmed = false;
                 state = FLUSHING;
                 stateStartTime = millis();
                 break;
@@ -231,9 +237,13 @@ void Control::update(Sensors &s, Commands &cmds) {
                 Serial.println("[FAULT] Pérdida condición");
                 flowFaultArmed     = false;
                 recoveryFaultArmed = false;
+                pMembraneHighArmed = false;
                 state = IDLE;
                 break;
             }
+
+            // ── Protección de presión de membrana alta (única protección crítica V1) ──
+            if (checkMembraneHighPressure(s)) break;
 
             // ── Protección de caudal de permeado ─────────────────────────────
             {
@@ -333,6 +343,39 @@ void Control::update(Sensors &s, Commands &cmds) {
     _justFaulted = (state == FAULT && lastState != FAULT);
 }
 
+// ================= PRESSURE PROTECTION =================
+
+// Única protección crítica de presión en V1: membrana alta presión.
+// Requiere pressure_membrane_enabled (calibración cargada) y
+// pressure_membrane_limits_enabled (protección habilitada). Debounce vía
+// pressure_fault_delay_sec, mismo patrón que FLOW_LOW/RECOVERY_*.
+bool Control::checkMembraneHighPressure(Sensors& s) {
+    const SensorConfig& cfg = s.getConfig();
+    if (!cfg.pressure_membrane_enabled || !cfg.pressure_membrane_limits_enabled) {
+        pMembraneHighArmed = false;
+        return false;
+    }
+
+    unsigned long delayMs = (unsigned long)cfg.pressure_fault_delay_sec * 1000UL;
+
+    if (s.getPressure1() > cfg.pressure_membrane_high_limit) {
+        if (!pMembraneHighArmed) {
+            pMembraneHighTimer = millis();
+            pMembraneHighArmed = true;
+        } else if (millis() - pMembraneHighTimer >= delayMs) {
+            Serial.printf("[FAULT] PRESSURE_MEMBRANE_HIGH: %.2f bar > %.2f bar (umbral)\n",
+                          s.getPressure1(), cfg.pressure_membrane_high_limit);
+            faultReason        = FaultReason::PRESSURE_MEMBRANE_HIGH;
+            pMembraneHighArmed = false;
+            state              = FAULT;
+            return true;
+        }
+    } else {
+        pMembraneHighArmed = false;
+    }
+    return false;
+}
+
 // ================= COMMAND VALIDATION =================
 
 bool Control::isValidTransition(CommandType cmd) const {
@@ -376,6 +419,7 @@ void Control::applyCommand(CommandType cmd) {
             faultReason        = FaultReason::NONE;
             flowFaultArmed     = false;
             recoveryFaultArmed = false;
+            pMembraneHighArmed = false;
             state              = IDLE;
             break;
         default:

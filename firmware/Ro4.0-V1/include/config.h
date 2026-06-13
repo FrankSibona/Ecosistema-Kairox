@@ -55,6 +55,29 @@
 #define MAX_RECOVERY_PCT_DEFAULT      85.0f  // % — recovery máxima en PRODUCING
 #define RECOVERY_FAULT_DELAY_SEC_DEFAULT 60U // segundos continuo fuera de rango → FAULT
 
+// ── Calibración de presión (voltaje→bar), por canal ──────────────────────────
+// *_enabled = 0 (default): pressure_membrane_bar/pressure_brine_bar se calculan
+// con la fórmula legacy (adc/4095*10, EWMA), sin cambios respecto al firmware
+// actual. *_enabled = 1: calibración lineal v_min/v_max → bar_min/bar_max.
+#define PRESSURE_ADC_VREF                       3.1f  // ADC_11db full-scale (V), PIN_AIN0/AIN1
+
+#define PRESSURE_MEMBRANE_ENABLED_DEFAULT          0
+#define PRESSURE_MEMBRANE_MIN_VOLTAGE_DEFAULT   0.5f
+#define PRESSURE_MEMBRANE_MAX_VOLTAGE_DEFAULT   4.5f
+#define PRESSURE_MEMBRANE_MIN_BAR_DEFAULT       0.0f
+#define PRESSURE_MEMBRANE_MAX_BAR_DEFAULT      14.0f
+#define PRESSURE_MEMBRANE_LIMITS_ENABLED_DEFAULT   0
+#define PRESSURE_MEMBRANE_HIGH_LIMIT_DEFAULT   12.0f
+
+#define PRESSURE_BRINE_ENABLED_DEFAULT             0
+#define PRESSURE_BRINE_MIN_VOLTAGE_DEFAULT      0.5f
+#define PRESSURE_BRINE_MAX_VOLTAGE_DEFAULT      4.5f
+#define PRESSURE_BRINE_MIN_BAR_DEFAULT          0.0f
+#define PRESSURE_BRINE_MAX_BAR_DEFAULT         14.0f
+
+// Debounce compartido para la protección crítica de presión de membrana alta.
+#define PRESSURE_FAULT_DELAY_SEC_DEFAULT           3U
+
 // ── NVS config integrity ──────────────────────────────────────────────────────
 // CFG_MAGIC is written alongside calibration data in NVS namespace "kx_cfg".
 // On load, if magic or version don't match, the entire stored config is

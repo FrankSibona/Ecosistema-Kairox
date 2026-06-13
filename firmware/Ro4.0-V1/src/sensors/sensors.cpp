@@ -68,6 +68,19 @@ void Sensors::loadConfig() {
     loaded.min_recovery_pct          = p.getFloat ("min_rec",MIN_RECOVERY_PCT_DEFAULT);
     loaded.max_recovery_pct          = p.getFloat ("max_rec",MAX_RECOVERY_PCT_DEFAULT);
     loaded.recovery_fault_delay_sec  = p.getUInt  ("rec_d",  RECOVERY_FAULT_DELAY_SEC_DEFAULT);
+    loaded.pressure_membrane_enabled        = p.getUChar("pm_en",   PRESSURE_MEMBRANE_ENABLED_DEFAULT);
+    loaded.pressure_membrane_min_voltage    = p.getFloat("pm_minv", PRESSURE_MEMBRANE_MIN_VOLTAGE_DEFAULT);
+    loaded.pressure_membrane_max_voltage    = p.getFloat("pm_maxv", PRESSURE_MEMBRANE_MAX_VOLTAGE_DEFAULT);
+    loaded.pressure_membrane_min_bar        = p.getFloat("pm_minb", PRESSURE_MEMBRANE_MIN_BAR_DEFAULT);
+    loaded.pressure_membrane_max_bar        = p.getFloat("pm_maxb", PRESSURE_MEMBRANE_MAX_BAR_DEFAULT);
+    loaded.pressure_membrane_limits_enabled = p.getUChar("pm_lim",  PRESSURE_MEMBRANE_LIMITS_ENABLED_DEFAULT);
+    loaded.pressure_membrane_high_limit     = p.getFloat("pm_hi",   PRESSURE_MEMBRANE_HIGH_LIMIT_DEFAULT);
+    loaded.pressure_fault_delay_sec         = p.getUInt ("p_fdly",  PRESSURE_FAULT_DELAY_SEC_DEFAULT);
+    loaded.pressure_brine_enabled           = p.getUChar("pb_en",   PRESSURE_BRINE_ENABLED_DEFAULT);
+    loaded.pressure_brine_min_voltage       = p.getFloat("pb_minv", PRESSURE_BRINE_MIN_VOLTAGE_DEFAULT);
+    loaded.pressure_brine_max_voltage       = p.getFloat("pb_maxv", PRESSURE_BRINE_MAX_VOLTAGE_DEFAULT);
+    loaded.pressure_brine_min_bar           = p.getFloat("pb_minb", PRESSURE_BRINE_MIN_BAR_DEFAULT);
+    loaded.pressure_brine_max_bar           = p.getFloat("pb_maxb", PRESSURE_BRINE_MAX_BAR_DEFAULT);
     loaded.updated_at                = p.getULong ("ts",     0);
     p.end();
 
@@ -108,6 +121,19 @@ void Sensors::saveConfig() {
     p.putFloat("min_rec", _cfg.min_recovery_pct);
     p.putFloat("max_rec", _cfg.max_recovery_pct);
     p.putUInt ("rec_d",   _cfg.recovery_fault_delay_sec);
+    p.putUChar("pm_en",   _cfg.pressure_membrane_enabled);
+    p.putFloat("pm_minv", _cfg.pressure_membrane_min_voltage);
+    p.putFloat("pm_maxv", _cfg.pressure_membrane_max_voltage);
+    p.putFloat("pm_minb", _cfg.pressure_membrane_min_bar);
+    p.putFloat("pm_maxb", _cfg.pressure_membrane_max_bar);
+    p.putUChar("pm_lim",  _cfg.pressure_membrane_limits_enabled);
+    p.putFloat("pm_hi",   _cfg.pressure_membrane_high_limit);
+    p.putUInt ("p_fdly",  _cfg.pressure_fault_delay_sec);
+    p.putUChar("pb_en",   _cfg.pressure_brine_enabled);
+    p.putFloat("pb_minv", _cfg.pressure_brine_min_voltage);
+    p.putFloat("pb_maxv", _cfg.pressure_brine_max_voltage);
+    p.putFloat("pb_minb", _cfg.pressure_brine_min_bar);
+    p.putFloat("pb_maxb", _cfg.pressure_brine_max_bar);
     p.putULong("ts",      _cfg.updated_at);
     p.end();
 }
@@ -135,7 +161,20 @@ bool Sensors::isValidConfig(const SensorConfig& c) {
         && c.flow_fault_delay_sec >= 5  && c.flow_fault_delay_sec <= 300
         && inRange(c.min_recovery_pct,     1.0f,   99.0f)
         && inRange(c.max_recovery_pct,     1.0f,   99.0f)
-        && c.recovery_fault_delay_sec >= 5 && c.recovery_fault_delay_sec <= 300;
+        && c.recovery_fault_delay_sec >= 5 && c.recovery_fault_delay_sec <= 300
+        && c.pressure_membrane_enabled        <= 1
+        && inRange(c.pressure_membrane_min_voltage,  0.0f,  15.0f)
+        && inRange(c.pressure_membrane_max_voltage,  0.0f,  15.0f)
+        && inRange(c.pressure_membrane_min_bar,      0.0f,  50.0f)
+        && inRange(c.pressure_membrane_max_bar,      0.0f,  50.0f)
+        && c.pressure_membrane_limits_enabled <= 1
+        && inRange(c.pressure_membrane_high_limit,   0.0f,  50.0f)
+        && c.pressure_fault_delay_sec >= 1  && c.pressure_fault_delay_sec <= 300
+        && c.pressure_brine_enabled           <= 1
+        && inRange(c.pressure_brine_min_voltage,     0.0f,  15.0f)
+        && inRange(c.pressure_brine_max_voltage,     0.0f,  15.0f)
+        && inRange(c.pressure_brine_min_bar,         0.0f,  50.0f)
+        && inRange(c.pressure_brine_max_bar,         0.0f,  50.0f);
 }
 
 // Applies config if: (a) it passes validation AND (b) it is newer than current.
@@ -222,6 +261,14 @@ float Sensors::calibrateTdsPpm(float voltage, float temperature, float slope, fl
     float mv    = (voltage / coeff) * 1000.0f;
     float ppm   = slope * mv + offset;
     return ppm < 0.0f ? 0.0f : ppm;
+}
+
+// ── Pressure calibration (voltage → bar) ──────────────────────────────────────
+// Calibración lineal 2 puntos: y = y_min + ((v - v_min)/(v_max - v_min)) * (y_max - y_min).
+// No clampea — fuera de rango es información válida (sub/sobre-presión).
+float Sensors::calibrateLinear(float v, float v_min, float v_max, float y_min, float y_max) {
+    if (v_max == v_min) return y_min;  // evita división por cero en config inválida
+    return y_min + ((v - v_min) / (v_max - v_min)) * (y_max - y_min);
 }
 
 // 5-sample median sort (insertion sort on a local copy — O(n²) for n=5 = 10 ops max).
@@ -375,18 +422,42 @@ void Sensors::update() {
         lastSaveTime = millis();
     }
 
-    // ── Pressure (EWMA α=0.3) ─────────────────────────────────────────────────
+    // ── Pressure (voltage EWMA α=0.3, siempre; bar = calibrado o legacy) ──────
     const float alpha = 0.3f;
     p1_adc = analogRead(PIN_AIN0);
     p2_adc = analogRead(PIN_AIN1);
-    float p1_raw = (p1_adc / 4095.0f) * 10.0f;
-    float p2_raw = (p2_adc / 4095.0f) * 10.0f;
-    if (p1_f == 0) p1_f = p1_raw;
-    if (p2_f == 0) p2_f = p2_raw;
-    p1_f = alpha * p1_raw + (1.0f - alpha) * p1_f;
-    p2_f = alpha * p2_raw + (1.0f - alpha) * p2_f;
-    p1 = p1_f;
-    p2 = p2_f;
+
+    float pm_v_raw = (p1_adc / 4095.0f) * PRESSURE_ADC_VREF;
+    float pb_v_raw = (p2_adc / 4095.0f) * PRESSURE_ADC_VREF;
+    if (pm_v_f == 0) pm_v_f = pm_v_raw;
+    if (pb_v_f == 0) pb_v_f = pb_v_raw;
+    pm_v_f = alpha * pm_v_raw + (1.0f - alpha) * pm_v_f;
+    pb_v_f = alpha * pb_v_raw + (1.0f - alpha) * pb_v_f;
+
+    if (_cfg.pressure_membrane_enabled) {
+        p1 = calibrateLinear(pm_v_f, _cfg.pressure_membrane_min_voltage, _cfg.pressure_membrane_max_voltage,
+                                      _cfg.pressure_membrane_min_bar,    _cfg.pressure_membrane_max_bar);
+    } else {
+        // Legacy: sin cambios respecto al comportamiento previo a calibración.
+        float p1_raw = (p1_adc / 4095.0f) * 10.0f;
+        if (p1_f == 0) p1_f = p1_raw;
+        p1_f = alpha * p1_raw + (1.0f - alpha) * p1_f;
+        p1 = p1_f;
+    }
+
+    if (_cfg.pressure_brine_enabled) {
+        p2 = calibrateLinear(pb_v_f, _cfg.pressure_brine_min_voltage, _cfg.pressure_brine_max_voltage,
+                                      _cfg.pressure_brine_min_bar,    _cfg.pressure_brine_max_bar);
+    } else {
+        // Legacy: sin cambios respecto al comportamiento previo a calibración.
+        float p2_raw = (p2_adc / 4095.0f) * 10.0f;
+        if (p2_f == 0) p2_f = p2_raw;
+        p2_f = alpha * p2_raw + (1.0f - alpha) * p2_f;
+        p2 = p2_f;
+    }
+
+    dp_bar = (_cfg.pressure_membrane_enabled && _cfg.pressure_brine_enabled)
+             ? (p1 - p2) : NAN;
 
     // ── TDS (5-sample median + DFRobot polynomial) ────────────────────────────
     // analogReadMilliVolts() uses ESP32 factory ADC calibration (better than
@@ -421,6 +492,9 @@ float Sensors::getFlow1()       { return flow1; }
 float Sensors::getFlow2()       { return flow2; }
 float Sensors::getPressure1()   { return p1; }
 float Sensors::getPressure2()   { return p2; }
+float Sensors::getPressureMembraneVoltage() { return pm_v_f; }
+float Sensors::getPressureBrineVoltage()    { return pb_v_f; }
+float Sensors::getDeltaPBar()               { return dp_bar; }
 float Sensors::getTDS1Voltage() { return tds1_v; }
 float Sensors::getTDS2Voltage() { return tds2_v; }
 float Sensors::getTDS1Ppm()     { return tds1_ppm; }

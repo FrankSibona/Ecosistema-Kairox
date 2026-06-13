@@ -20,12 +20,16 @@ enum SystemState {
 // FLOW_LOW:      permeate flow below min_flow_lpm for flow_fault_delay_sec.
 // RECOVERY_LOW:  water recovery below min_recovery_pct for recovery_fault_delay_sec.
 // RECOVERY_HIGH: water recovery above max_recovery_pct for recovery_fault_delay_sec.
+// PRESSURE_MEMBRANE_HIGH: pressure_membrane_bar above pressure_membrane_high_limit
+//                         for pressure_fault_delay_sec (requiere pressure_membrane_enabled
+//                         y pressure_membrane_limits_enabled).
 enum class FaultReason : uint8_t {
-    NONE          = 0,
-    MAX_RETRIES   = 1,
-    FLOW_LOW      = 2,
-    RECOVERY_LOW  = 3,
-    RECOVERY_HIGH = 4,
+    NONE                   = 0,
+    MAX_RETRIES            = 1,
+    FLOW_LOW               = 2,
+    RECOVERY_LOW           = 3,
+    RECOVERY_HIGH          = 4,
+    PRESSURE_MEMBRANE_HIGH = 5,
 };
 
 // ===================== OUTPUTS =====================
@@ -76,6 +80,8 @@ private:
     bool          flowFaultArmed       = false;
     unsigned long recoveryFaultTimer   = 0;
     bool          recoveryFaultArmed   = false;
+    unsigned long pMembraneHighTimer   = 0;
+    bool          pMembraneHighArmed   = false;
     // ────────────────────────────────────────────────────────────────────────
 
     // Set to true for exactly one loop iteration when FSM first enters FAULT.
@@ -101,4 +107,8 @@ private:
 
     bool isValidTransition(CommandType cmd) const;
     void applyCommand(CommandType cmd);
+
+    // Protección crítica: presión de membrana alta → FAULT (emergency stop).
+    // Debounce via pressure_fault_delay_sec. Evaluada solo en STARTING/PRODUCING.
+    bool checkMembraneHighPressure(Sensors& s);
 };

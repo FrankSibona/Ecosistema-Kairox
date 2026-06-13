@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <string.h>
+#include <math.h>  // isnan
 
 #include "../sensors/sensors.h"
 #include "../control/control.h"
@@ -75,7 +76,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strcmp(topic, cfg_topic) == 0) {
         if (!s_sensors) return;
 
-        StaticJsonDocument<384> doc;
+        StaticJsonDocument<768> doc;
         DeserializationError err = deserializeJson(doc, payload, length);
         if (err) {
             Serial.print("[CFG] JSON inválido: ");
@@ -99,6 +100,19 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         incoming.min_recovery_pct          = doc["min_recovery_pct"]          | cur.min_recovery_pct;
         incoming.max_recovery_pct          = doc["max_recovery_pct"]          | cur.max_recovery_pct;
         incoming.recovery_fault_delay_sec  = doc["recovery_fault_delay_sec"]  | cur.recovery_fault_delay_sec;
+        incoming.pressure_membrane_enabled        = doc["pressure_membrane_enabled"]        | cur.pressure_membrane_enabled;
+        incoming.pressure_membrane_min_voltage    = doc["pressure_membrane_min_voltage"]    | cur.pressure_membrane_min_voltage;
+        incoming.pressure_membrane_max_voltage    = doc["pressure_membrane_max_voltage"]    | cur.pressure_membrane_max_voltage;
+        incoming.pressure_membrane_min_bar        = doc["pressure_membrane_min_bar"]        | cur.pressure_membrane_min_bar;
+        incoming.pressure_membrane_max_bar        = doc["pressure_membrane_max_bar"]        | cur.pressure_membrane_max_bar;
+        incoming.pressure_membrane_limits_enabled = doc["pressure_membrane_limits_enabled"] | cur.pressure_membrane_limits_enabled;
+        incoming.pressure_membrane_high_limit     = doc["pressure_membrane_high_limit"]     | cur.pressure_membrane_high_limit;
+        incoming.pressure_fault_delay_sec         = doc["pressure_fault_delay_sec"]         | cur.pressure_fault_delay_sec;
+        incoming.pressure_brine_enabled           = doc["pressure_brine_enabled"]           | cur.pressure_brine_enabled;
+        incoming.pressure_brine_min_voltage       = doc["pressure_brine_min_voltage"]       | cur.pressure_brine_min_voltage;
+        incoming.pressure_brine_max_voltage       = doc["pressure_brine_max_voltage"]       | cur.pressure_brine_max_voltage;
+        incoming.pressure_brine_min_bar           = doc["pressure_brine_min_bar"]           | cur.pressure_brine_min_bar;
+        incoming.pressure_brine_max_bar           = doc["pressure_brine_max_bar"]           | cur.pressure_brine_max_bar;
         incoming.updated_at                = doc["updated_at"]                | (unsigned long)0;
 
         s_sensors->setConfig(incoming);
@@ -140,7 +154,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "1.1.1";
+const char* fw_version = "1.1.2";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -183,6 +197,12 @@ long getTimestamp() {
 
 String baseTopic(String sub) {
     return "fyntek/" + device_id + "/" + sub;
+}
+
+// JSON no admite NaN — delta_p_bar es NAN cuando no hay calibración en ambos
+// canales de presión. Se publica como `null` (sin valor artificial) en ese caso.
+static String floatOrNull(float v) {
+    return isnan(v) ? String("null") : String(v, 3);
 }
 
 // ── I/O publish helpers ───────────────────────────────────────────────────────
@@ -296,11 +316,16 @@ void Comms::begin(Commands &cmds, Sensors &s, DiagMode &diag, FlightRecorder &fr
 static void publishDiag(Sensors& s, Control& c, DiagMode& diag, long ts) {
     static char buf[1024];
     const DiagTransitions& tr = diag.getTransitions();
+    char dpBuf[16];
+    float dp = s.getDeltaPBar();
+    if (isnan(dp)) snprintf(dpBuf, sizeof(dpBuf), "null");
+    else           snprintf(dpBuf, sizeof(dpBuf), "%.3f", dp);
     snprintf(buf, sizeof(buf),
         "{\"device_id\":\"%s\",\"ts\":%ld,"
         "\"state\":\"%s\",\"fault_reason\":%u,\"retry\":%d,"
         "\"flow1\":%.2f,\"flow2\":%.2f,"
         "\"p1_bar\":%.2f,\"p2_bar\":%.2f,\"p1_adc\":%d,\"p2_adc\":%d,"
+        "\"pm_voltage\":%.3f,\"pb_voltage\":%.3f,\"delta_p_bar\":%s,"
         "\"tds1_ppm\":%.1f,\"tds2_ppm\":%.1f,"
         "\"tds1_mv\":%d,\"tds2_mv\":%d,\"tds1_raw\":%d,\"tds2_raw\":%d,"
         "\"d1\":%u,\"d2\":%u,\"d3\":%u,\"d4\":%u,\"d5\":%u,\"d6\":%u,"
@@ -314,6 +339,7 @@ static void publishDiag(Sensors& s, Control& c, DiagMode& diag, long ts) {
         c.getStateName(), (uint8_t)c.getFaultReason(), c.getRetryCount(),
         s.getFlow1(), s.getFlow2(),
         s.getPressure1(), s.getPressure2(), s.getPressure1Adc(), s.getPressure2Adc(),
+        s.getPressureMembraneVoltage(), s.getPressureBrineVoltage(), dpBuf,
         s.getTDS1Ppm(), s.getTDS2Ppm(),
         s.getTDS1MvRaw(), s.getTDS2MvRaw(), s.getTDS1AdcRaw(), s.getTDS2AdcRaw(),
         (uint8_t)s.getD1(), (uint8_t)s.getD2(), (uint8_t)s.getD3(),
@@ -365,6 +391,9 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
             json += "\"flow_reject_lpm\":" + String(s.getFlow2()) + ",";
             json += "\"pressure_membrane_bar\":" + String(s.getPressure1()) + ",";
             json += "\"pressure_brine_bar\":" + String(s.getPressure2()) + ",";
+            json += "\"pressure_membrane_voltage\":" + String(s.getPressureMembraneVoltage(), 3) + ",";
+            json += "\"pressure_brine_voltage\":" + String(s.getPressureBrineVoltage(), 3) + ",";
+            json += "\"delta_p_bar\":" + floatOrNull(s.getDeltaPBar()) + ",";
             json += "\"volume_permeate_l\":" + String(s.getTotalPerm()) + ",";
             json += "\"volume_reject_l\":" + String(s.getTotalRech());
             json += "}";
@@ -424,6 +453,9 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
         json += "\"flow_reject_lpm\":" + String(s.getFlow2()) + ",";
         json += "\"pressure_membrane_bar\":" + String(s.getPressure1()) + ",";
         json += "\"pressure_brine_bar\":" + String(s.getPressure2()) + ",";
+        json += "\"pressure_membrane_voltage\":" + String(s.getPressureMembraneVoltage(), 3) + ",";
+        json += "\"pressure_brine_voltage\":" + String(s.getPressureBrineVoltage(), 3) + ",";
+        json += "\"delta_p_bar\":" + floatOrNull(s.getDeltaPBar()) + ",";
         json += "\"volume_permeate_l\":" + String(s.getTotalPerm()) + ",";
         json += "\"volume_reject_l\":" + String(s.getTotalRech());
 
