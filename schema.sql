@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS telemetry_process (
     flow_reject_lpm        FLOAT,
     pressure_membrane_bar   FLOAT,
     pressure_brine_bar      FLOAT,
+    pressure_membrane_voltage FLOAT,
+    pressure_brine_voltage  FLOAT,
+    delta_p_bar             FLOAT,
     volume_permeate_l           FLOAT,
     volume_reject_l        FLOAT,
     fw_version              TEXT
@@ -123,6 +126,10 @@ CREATE TABLE IF NOT EXISTS device_status (
     -- Lecturas de proceso
     flow_permeate_lpm           FLOAT,
     pressure_membrane       FLOAT,
+    pressure_brine_bar        FLOAT,
+    pressure_membrane_voltage  FLOAT,
+    pressure_brine_voltage     FLOAT,
+    delta_p_bar                FLOAT,
     recovery                FLOAT,
     efficiency              FLOAT,
 
@@ -191,6 +198,25 @@ CREATE TABLE IF NOT EXISTS device_config (
     min_recovery_pct        FLOAT       DEFAULT 10.0,   -- % recovery mínima → RECOVERY_LOW
     max_recovery_pct        FLOAT       DEFAULT 85.0,   -- % recovery máxima → RECOVERY_HIGH
     recovery_fault_delay_sec INTEGER    DEFAULT 60,     -- segundos fuera de rango antes de FAULT
+    -- ── PRESSURE CALIBRATION (voltaje→bar), por canal — sincronizado con firmware ──
+    pressure_membrane_enabled        BOOLEAN DEFAULT FALSE,
+    pressure_membrane_min_voltage    FLOAT   DEFAULT 0.5,
+    pressure_membrane_max_voltage    FLOAT   DEFAULT 4.5,
+    pressure_membrane_min_bar        FLOAT   DEFAULT 0.0,
+    pressure_membrane_max_bar        FLOAT   DEFAULT 14.0,
+    pressure_membrane_limits_enabled BOOLEAN DEFAULT FALSE,  -- protección crítica firmware (FAULT)
+    pressure_membrane_high_limit     FLOAT   DEFAULT 12.0,
+    pressure_fault_delay_sec         INTEGER DEFAULT 3,
+    pressure_brine_enabled           BOOLEAN DEFAULT FALSE,
+    pressure_brine_min_voltage       FLOAT   DEFAULT 0.5,
+    pressure_brine_max_voltage       FLOAT   DEFAULT 4.5,
+    pressure_brine_min_bar           FLOAT   DEFAULT 0.0,
+    pressure_brine_max_bar           FLOAT   DEFAULT 14.0,
+    -- ── ALARMAS DIAGNÓSTICAS (backend-only, NO se publican a firmware) ──────────
+    pressure_brine_high_limit        FLOAT   DEFAULT 8.0,
+    pressure_brine_alarm_enabled     BOOLEAN DEFAULT FALSE,
+    delta_p_alarm_enabled            BOOLEAN DEFAULT FALSE,
+    delta_p_alarm_limit               FLOAT  DEFAULT 5.0,
     -- ─────────────────────────────────────────────────────────────────────────
     friendly_name           TEXT,
     location                TEXT,

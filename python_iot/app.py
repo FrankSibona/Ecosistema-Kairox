@@ -290,6 +290,9 @@ DIAG_SCORES = {
     "LOW_PRESSURE":         35,
     "DECLINING_EFFICIENCY": 30,
     "RESIDUAL_FLOW_STOPPED": 15,
+    "MEMBRANE_HIGH_PRESSURE_ALARM": 70,
+    "DELTA_P_ALARM":               60,
+    "BRINE_HIGH_PRESSURE_ALARM":    50,
 }
 
 IMMEDIATE_ALERT_CODES = {
@@ -323,6 +326,9 @@ RISK_WEIGHTS = {
     "FOULING_PROGRESSIVE":  35,  # tendencia
     "DECLINING_EFFICIENCY": 25,  # tendencia
     "RESIDUAL_FLOW_STOPPED": 15,
+    "MEMBRANE_HIGH_PRESSURE_ALARM": 55,
+    "DELTA_P_ALARM":               45,
+    "BRINE_HIGH_PRESSURE_ALARM":    35,
 }
 
 def map_severity_to_health(severity: str) -> str:
@@ -499,7 +505,9 @@ class KPIEngine:
         if cached.get("_ts", 0) > time.time() - 300:
             return cached
         rows = db.fetchall(
-            "SELECT pump_power_kw, cost_kwh, cost_water_m3, daily_target_liters "
+            "SELECT pump_power_kw, cost_kwh, cost_water_m3, daily_target_liters, "
+            "pressure_membrane_high_limit, pressure_brine_high_limit, "
+            "pressure_brine_alarm_enabled, delta_p_alarm_enabled, delta_p_alarm_limit "
             "FROM device_config WHERE device_id = %s",
             (device_id,)
         )
@@ -508,6 +516,11 @@ class KPIEngine:
             "cost_kwh":            rows[0][1] if rows else 0.12,
             "cost_water_m3":       rows[0][2] if rows else 0.80,
             "daily_target_liters": rows[0][3] if rows else 0.0,
+            "pressure_membrane_high_limit": rows[0][4] if rows else 12.0,
+            "pressure_brine_high_limit":    rows[0][5] if rows else 8.0,
+            "pressure_brine_alarm_enabled": rows[0][6] if rows else False,
+            "delta_p_alarm_enabled":        rows[0][7] if rows else False,
+            "delta_p_alarm_limit":          rows[0][8] if rows else 5.0,
             "_ts":                 time.time(),
         }
         cls._device_config[device_id] = config
@@ -529,6 +542,9 @@ class KPIEngine:
             "flow_reject_lpm":     validate_float(process.get("flow_reject_lpm"),        0, 100),
             "pressure_membrane_bar": validate_float(process.get("pressure_membrane_bar"),  0, 50),
             "pressure_brine_bar":   validate_float(process.get("pressure_brine_bar"),      0, 50),
+            "pressure_membrane_voltage": validate_float(process.get("pressure_membrane_voltage"), 0, 15),
+            "pressure_brine_voltage":    validate_float(process.get("pressure_brine_voltage"),    0, 15),
+            "delta_p_bar":          validate_float(process.get("delta_p_bar"),            -50, 50),
             "volume_permeate_l":        validate_float(process.get("volume_permeate_l"),           0, 1e7),
             "volume_reject_l":     validate_float(process.get("volume_reject_l"),        0, 1e7),
         }
@@ -1101,7 +1117,7 @@ class DiagnosticEngine:
         all_diags.extend(self._eval_events(state, inputs, process, device_id))
         if metrics:
             all_diags.extend(self._eval_operational(metrics, process, thresh, state))
-        all_diags.extend(self._eval_contextual(state, process))
+        all_diags.extend(self._eval_contextual(state, process, device_id))
         sensor_diag = self._check_sensor_invalid(process, metrics)
         if sensor_diag:
             all_diags.append(sensor_diag)
@@ -1334,7 +1350,7 @@ class DiagnosticEngine:
 
         return results
 
-    def _eval_contextual(self, state, process) -> List[DiagnosticResult]:
+    def _eval_contextual(self, state, process, device_id=None) -> List[DiagnosticResult]:
         """Diagnósticos que dependen del estado FSM y datos físicos crudos,
         independientes de KPIs derivados (metrics)."""
         results = []
@@ -1349,6 +1365,53 @@ class DiagnosticEngine:
                 {"flow_reject_lpm": flow_reject, "state": state},
                 score=DIAG_SCORES["RESIDUAL_FLOW_STOPPED"],
             ))
+
+        # ── Alarmas de presión (diagnósticas, no detienen el equipo) ──────────
+        # Evaluadas solo en STARTING/PRODUCING — fuera de ese rango las lecturas
+        # de presión no son representativas (equipo despresurizado/transitorio).
+        if state in ACTIVE_STATES and device_id:
+            cfg     = KPIEngine._get_config(device_id)
+            p_mem   = validate_float(process.get("pressure_membrane_bar"), 0, 50)
+            p_brine = validate_float(process.get("pressure_brine_bar"),    0, 50)
+            delta_p = validate_float(process.get("delta_p_bar"),         -50, 50)
+
+            if p_mem is not None and p_mem > cfg["pressure_membrane_high_limit"]:
+                results.append(DiagnosticResult(
+                    "WARNING", "MEMBRANE_HIGH_PRESSURE_ALARM",
+                    f"Presión de membrana elevada: {p_mem:.2f} bar > "
+                    f"{cfg['pressure_membrane_high_limit']:.2f} bar (umbral).",
+                    "Verificar válvula de rechazo, posible obstrucción o ensuciamiento de membrana.",
+                    {"pressure_membrane_bar": p_mem,
+                     "pressure_membrane_high_limit": cfg["pressure_membrane_high_limit"],
+                     "state": state},
+                    score=DIAG_SCORES["MEMBRANE_HIGH_PRESSURE_ALARM"],
+                ))
+
+            if (cfg["pressure_brine_alarm_enabled"] and p_brine is not None and
+                    p_brine > cfg["pressure_brine_high_limit"]):
+                results.append(DiagnosticResult(
+                    "WARNING", "BRINE_HIGH_PRESSURE_ALARM",
+                    f"Presión de rechazo elevada: {p_brine:.2f} bar > "
+                    f"{cfg['pressure_brine_high_limit']:.2f} bar (umbral).",
+                    "Verificar válvula de rechazo y obstrucciones en la línea de rechazo.",
+                    {"pressure_brine_bar": p_brine,
+                     "pressure_brine_high_limit": cfg["pressure_brine_high_limit"],
+                     "state": state},
+                    score=DIAG_SCORES["BRINE_HIGH_PRESSURE_ALARM"],
+                ))
+
+            if (cfg["delta_p_alarm_enabled"] and delta_p is not None and
+                    delta_p > cfg["delta_p_alarm_limit"]):
+                results.append(DiagnosticResult(
+                    "WARNING", "DELTA_P_ALARM",
+                    f"Delta de presión membrana-rechazo elevado: {delta_p:.2f} bar > "
+                    f"{cfg['delta_p_alarm_limit']:.2f} bar (umbral).",
+                    "Posible indicio de fouling/scaling de membrana — programar limpieza CIP.",
+                    {"delta_p_bar": delta_p,
+                     "delta_p_alarm_limit": cfg["delta_p_alarm_limit"],
+                     "state": state},
+                    score=DIAG_SCORES["DELTA_P_ALARM"],
+                ))
 
         return results
 
@@ -1998,9 +2061,12 @@ class MessageProcessor:
             handler(device_id, timestamp, data)
 
     def _auto_register(self, device_id: str, fw_version: str = ""):
+        # No pisar fw_version con "" — /heartbeat no incluye este campo, solo
+        # /process y /quality lo reportan. Conserva el último valor no vacío.
         db.execute(
             "INSERT INTO devices (device_id, fw_version, registered_at) VALUES (%s,%s,NOW()) "
-            "ON CONFLICT (device_id) DO UPDATE SET fw_version = EXCLUDED.fw_version",
+            "ON CONFLICT (device_id) DO UPDATE SET fw_version = "
+            "CASE WHEN EXCLUDED.fw_version <> '' THEN EXCLUDED.fw_version ELSE devices.fw_version END",
             (device_id, fw_version)
         )
 
@@ -2025,19 +2091,24 @@ class MessageProcessor:
         db.execute(
             "INSERT INTO telemetry_process "
             "(time,device_id,flow_permeate_lpm,flow_reject_lpm,pressure_membrane_bar,"
-            "pressure_brine_bar,volume_permeate_l,volume_reject_l,fw_version) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "pressure_brine_bar,pressure_membrane_voltage,pressure_brine_voltage,delta_p_bar,"
+            "volume_permeate_l,volume_reject_l,fw_version) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
                 timestamp, device_id,
                 validate_float(data.get("flow_permeate_lpm"),          0, 100),
                 validate_float(data.get("flow_reject_lpm"),        0, 100),
                 validate_float(data.get("pressure_membrane_bar"),   0, 50),
                 validate_float(data.get("pressure_brine_bar"),      0, 50),
+                validate_float(data.get("pressure_membrane_voltage"), 0, 15),
+                validate_float(data.get("pressure_brine_voltage"),    0, 15),
+                validate_float(data.get("delta_p_bar"),             -50, 50),
                 validate_float(data.get("volume_permeate_l"),           0, 1e7),
                 validate_float(data.get("volume_reject_l"),        0, 1e7),
                 data.get("fw_version", ""),
             ),
         )
+        self._auto_register(device_id, data.get("fw_version", ""))
         tracker.update_process(device_id, data)
         alert_manager.check_reconnection(device_id)
         realtime_engine.dispatch(device_id, timestamp, data)
@@ -2056,6 +2127,7 @@ class MessageProcessor:
              tds_in_v, tds_out_v, tds_in_ppm, tds_out_ppm,
              data.get("fw_version", "")),
         )
+        self._auto_register(device_id, data.get("fw_version", ""))
         KPIEngine.update_quality_cache(device_id, {
             "tds_in_voltage":  tds_in_v,
             "tds_out_voltage": tds_out_v,
@@ -2226,7 +2298,9 @@ class MessageProcessor:
                 INSERT INTO device_status
                 (device_id, last_seen, online, state,
                 last_severity, last_diag_code, last_diag_message, last_action,
-                flow_permeate_lpm, pressure_membrane_bar, recovery, efficiency,
+                flow_permeate_lpm, pressure_membrane_bar, pressure_brine_bar,
+                pressure_membrane_voltage, pressure_brine_voltage, delta_p_bar,
+                recovery, efficiency,
                 health_status, health_code, health_message,
                 health_action, health_updated_at, secondary_diag_codes,
                 biz_liters_today, biz_target_liters, biz_fulfillment_pct,
@@ -2234,7 +2308,7 @@ class MessageProcessor:
                 biz_risk_level, biz_risk_score,
                 biz_degradation_pct, biz_degradation_days, biz_degradation_label,
                 biz_health_age_hours)
-                VALUES (%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                VALUES (%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                         %s,%s,%s,%s,%s,%s,
                         %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (device_id) DO UPDATE SET
@@ -2247,6 +2321,10 @@ class MessageProcessor:
                 last_action        = EXCLUDED.last_action,
                 flow_permeate_lpm      = EXCLUDED.flow_permeate_lpm,
                 pressure_membrane_bar  = EXCLUDED.pressure_membrane_bar,
+                pressure_brine_bar     = EXCLUDED.pressure_brine_bar,
+                pressure_membrane_voltage = EXCLUDED.pressure_membrane_voltage,
+                pressure_brine_voltage    = EXCLUDED.pressure_brine_voltage,
+                delta_p_bar            = EXCLUDED.delta_p_bar,
                 recovery           = EXCLUDED.recovery,
                 efficiency         = EXCLUDED.efficiency,
                 health_status      = EXCLUDED.health_status,
@@ -2279,6 +2357,10 @@ class MessageProcessor:
                     # 🔹 SOLO variables físicas válidas
                     physical.get("flow_permeate_lpm"),
                     physical.get("pressure_membrane_bar"),
+                    physical.get("pressure_brine_bar"),
+                    physical.get("pressure_membrane_voltage"),
+                    physical.get("pressure_brine_voltage"),
+                    physical.get("delta_p_bar"),
 
                     metrics["recovery"]   if metrics else None,
                     metrics["efficiency"] if metrics else None,
@@ -2310,9 +2392,11 @@ class MessageProcessor:
                 INSERT INTO device_status
                 (device_id, last_seen, online, state,
                 last_severity, last_diag_code, last_diag_message, last_action,
-                flow_permeate_lpm, pressure_membrane_bar, recovery, efficiency,
+                flow_permeate_lpm, pressure_membrane_bar, pressure_brine_bar,
+                pressure_membrane_voltage, pressure_brine_voltage, delta_p_bar,
+                recovery, efficiency,
                 biz_health_age_hours)
-                VALUES (%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,TRUE,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (device_id) DO UPDATE SET
                 last_seen         = EXCLUDED.last_seen,
                 online            = TRUE,
@@ -2323,6 +2407,10 @@ class MessageProcessor:
                 last_action       = EXCLUDED.last_action,
                 flow_permeate_lpm     = EXCLUDED.flow_permeate_lpm,
                 pressure_membrane_bar = EXCLUDED.pressure_membrane_bar,
+                pressure_brine_bar    = EXCLUDED.pressure_brine_bar,
+                pressure_membrane_voltage = EXCLUDED.pressure_membrane_voltage,
+                pressure_brine_voltage    = EXCLUDED.pressure_brine_voltage,
+                delta_p_bar           = EXCLUDED.delta_p_bar,
                 recovery          = EXCLUDED.recovery,
                 efficiency        = EXCLUDED.efficiency,
                 biz_health_age_hours = EXCLUDED.biz_health_age_hours
@@ -2339,6 +2427,10 @@ class MessageProcessor:
                     # 🔹 SOLO físicas
                     physical.get("flow_permeate_lpm"),
                     physical.get("pressure_membrane_bar"),
+                    physical.get("pressure_brine_bar"),
+                    physical.get("pressure_membrane_voltage"),
+                    physical.get("pressure_brine_voltage"),
+                    physical.get("delta_p_bar"),
 
                     metrics["recovery"]   if metrics else None,
                     metrics["efficiency"] if metrics else None,
@@ -2978,7 +3070,14 @@ def get_config(device_id):
         "flow_factor_1,flow_factor_2,tds_temperature,"
         "min_flow_lpm,max_flow_lpm,flow_fault_delay_sec,"
         "min_recovery_pct,max_recovery_pct,recovery_fault_delay_sec,"
-        "tds1_cal_slope,tds1_cal_offset,tds2_cal_slope,tds2_cal_offset "
+        "tds1_cal_slope,tds1_cal_offset,tds2_cal_slope,tds2_cal_offset,"
+        "pressure_membrane_enabled,pressure_membrane_min_voltage,pressure_membrane_max_voltage,"
+        "pressure_membrane_min_bar,pressure_membrane_max_bar,"
+        "pressure_membrane_limits_enabled,pressure_membrane_high_limit,pressure_fault_delay_sec,"
+        "pressure_brine_enabled,pressure_brine_min_voltage,pressure_brine_max_voltage,"
+        "pressure_brine_min_bar,pressure_brine_max_bar,"
+        "pressure_brine_high_limit,pressure_brine_alarm_enabled,"
+        "delta_p_alarm_enabled,delta_p_alarm_limit "
         "FROM device_config WHERE device_id=%s",
         (device_id,)
     )
@@ -2998,6 +3097,23 @@ def get_config(device_id):
         "recovery_fault_delay_sec": r[16],
         "tds1_cal_slope":           r[17], "tds1_cal_offset":       r[18],
         "tds2_cal_slope":           r[19], "tds2_cal_offset":       r[20],
+        "pressure_membrane_enabled":        r[21],
+        "pressure_membrane_min_voltage":    r[22],
+        "pressure_membrane_max_voltage":    r[23],
+        "pressure_membrane_min_bar":        r[24],
+        "pressure_membrane_max_bar":        r[25],
+        "pressure_membrane_limits_enabled": r[26],
+        "pressure_membrane_high_limit":     r[27],
+        "pressure_fault_delay_sec":         r[28],
+        "pressure_brine_enabled":           r[29],
+        "pressure_brine_min_voltage":       r[30],
+        "pressure_brine_max_voltage":       r[31],
+        "pressure_brine_min_bar":           r[32],
+        "pressure_brine_max_bar":           r[33],
+        "pressure_brine_high_limit":        r[34],
+        "pressure_brine_alarm_enabled":     r[35],
+        "delta_p_alarm_enabled":            r[36],
+        "delta_p_alarm_limit":              r[37],
     })
 
 @api.route("/api/config/<device_id>", methods=["POST"])
@@ -3016,6 +3132,25 @@ def set_config(device_id):
     tds1_cal_offset = float(data.get("tds1_cal_offset", 0.0))
     tds2_cal_slope  = float(data.get("tds2_cal_slope",  0.0))
     tds2_cal_offset = float(data.get("tds2_cal_offset", 0.0))
+    # ── Calibración de presión (voltaje→bar), por canal ──────────────────────
+    pm_en      = bool(data.get("pressure_membrane_enabled",        False))
+    pm_minv    = float(data.get("pressure_membrane_min_voltage",   0.5))
+    pm_maxv    = float(data.get("pressure_membrane_max_voltage",   4.5))
+    pm_minb    = float(data.get("pressure_membrane_min_bar",       0.0))
+    pm_maxb    = float(data.get("pressure_membrane_max_bar",      14.0))
+    pm_lim     = bool(data.get("pressure_membrane_limits_enabled", False))
+    pm_hi      = float(data.get("pressure_membrane_high_limit",   12.0))
+    p_fdly     = int(  data.get("pressure_fault_delay_sec",         3))
+    pb_en      = bool(data.get("pressure_brine_enabled",            False))
+    pb_minv    = float(data.get("pressure_brine_min_voltage",      0.5))
+    pb_maxv    = float(data.get("pressure_brine_max_voltage",      4.5))
+    pb_minb    = float(data.get("pressure_brine_min_bar",          0.0))
+    pb_maxb    = float(data.get("pressure_brine_max_bar",         14.0))
+    # ── Alarmas diagnósticas backend-only (NO se publican a firmware) ─────────
+    pb_hi_alarm     = float(data.get("pressure_brine_high_limit",  8.0))
+    pb_alarm_en     = bool(data.get("pressure_brine_alarm_enabled", False))
+    dp_alarm_en     = bool(data.get("delta_p_alarm_enabled",        False))
+    dp_alarm_limit  = float(data.get("delta_p_alarm_limit",         5.0))
     db.execute(
         "INSERT INTO device_config "
         "(device_id,pump_power_kw,cost_kwh,cost_water_m3,"
@@ -3024,8 +3159,16 @@ def set_config(device_id):
         "min_flow_lpm,max_flow_lpm,flow_fault_delay_sec,"
         "min_recovery_pct,max_recovery_pct,recovery_fault_delay_sec,"
         "tds1_cal_slope,tds1_cal_offset,tds2_cal_slope,tds2_cal_offset,"
+        "pressure_membrane_enabled,pressure_membrane_min_voltage,pressure_membrane_max_voltage,"
+        "pressure_membrane_min_bar,pressure_membrane_max_bar,"
+        "pressure_membrane_limits_enabled,pressure_membrane_high_limit,pressure_fault_delay_sec,"
+        "pressure_brine_enabled,pressure_brine_min_voltage,pressure_brine_max_voltage,"
+        "pressure_brine_min_bar,pressure_brine_max_bar,"
+        "pressure_brine_high_limit,pressure_brine_alarm_enabled,"
+        "delta_p_alarm_enabled,delta_p_alarm_limit,"
         "friendly_name,location,updated_at) "
-        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+        "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
         "ON CONFLICT (device_id) DO UPDATE SET "
         "pump_power_kw=EXCLUDED.pump_power_kw, cost_kwh=EXCLUDED.cost_kwh, "
         "cost_water_m3=EXCLUDED.cost_water_m3, target_recovery=EXCLUDED.target_recovery, "
@@ -3039,6 +3182,23 @@ def set_config(device_id):
         "recovery_fault_delay_sec=EXCLUDED.recovery_fault_delay_sec, "
         "tds1_cal_slope=EXCLUDED.tds1_cal_slope, tds1_cal_offset=EXCLUDED.tds1_cal_offset, "
         "tds2_cal_slope=EXCLUDED.tds2_cal_slope, tds2_cal_offset=EXCLUDED.tds2_cal_offset, "
+        "pressure_membrane_enabled=EXCLUDED.pressure_membrane_enabled, "
+        "pressure_membrane_min_voltage=EXCLUDED.pressure_membrane_min_voltage, "
+        "pressure_membrane_max_voltage=EXCLUDED.pressure_membrane_max_voltage, "
+        "pressure_membrane_min_bar=EXCLUDED.pressure_membrane_min_bar, "
+        "pressure_membrane_max_bar=EXCLUDED.pressure_membrane_max_bar, "
+        "pressure_membrane_limits_enabled=EXCLUDED.pressure_membrane_limits_enabled, "
+        "pressure_membrane_high_limit=EXCLUDED.pressure_membrane_high_limit, "
+        "pressure_fault_delay_sec=EXCLUDED.pressure_fault_delay_sec, "
+        "pressure_brine_enabled=EXCLUDED.pressure_brine_enabled, "
+        "pressure_brine_min_voltage=EXCLUDED.pressure_brine_min_voltage, "
+        "pressure_brine_max_voltage=EXCLUDED.pressure_brine_max_voltage, "
+        "pressure_brine_min_bar=EXCLUDED.pressure_brine_min_bar, "
+        "pressure_brine_max_bar=EXCLUDED.pressure_brine_max_bar, "
+        "pressure_brine_high_limit=EXCLUDED.pressure_brine_high_limit, "
+        "pressure_brine_alarm_enabled=EXCLUDED.pressure_brine_alarm_enabled, "
+        "delta_p_alarm_enabled=EXCLUDED.delta_p_alarm_enabled, "
+        "delta_p_alarm_limit=EXCLUDED.delta_p_alarm_limit, "
         "friendly_name=EXCLUDED.friendly_name, location=EXCLUDED.location, updated_at=NOW()",
         (device_id,
          data.get("pump_power_kw", 0.75),     data.get("cost_kwh", 0.12),
@@ -3048,6 +3208,9 @@ def set_config(device_id):
          min_flow, max_flow, flow_delay,
          min_rec, max_rec, rec_delay,
          tds1_cal_slope, tds1_cal_offset, tds2_cal_slope, tds2_cal_offset,
+         pm_en, pm_minv, pm_maxv, pm_minb, pm_maxb, pm_lim, pm_hi, p_fdly,
+         pb_en, pb_minv, pb_maxv, pb_minb, pb_maxb,
+         pb_hi_alarm, pb_alarm_en, dp_alarm_en, dp_alarm_limit,
          data.get("friendly_name", ""),       data.get("location", "")),
     )
     KPIEngine.invalidate_config(device_id)
@@ -3055,13 +3218,16 @@ def set_config(device_id):
                            min_flow, max_flow, flow_delay,
                            min_rec, max_rec, rec_delay,
                            tds1_cal_slope, tds1_cal_offset,
-                           tds2_cal_slope, tds2_cal_offset)
+                           tds2_cal_slope, tds2_cal_offset,
+                           pm_en, pm_minv, pm_maxv, pm_minb, pm_maxb, pm_lim, pm_hi, p_fdly,
+                           pb_en, pb_minv, pb_maxv, pb_minb, pb_maxb)
     alert_manager.fire_event(
         device_id, "CONFIG_UPDATED",
         f"Config actualizada: ff1={ff1} ff2={ff2} tds_t={tds_t} "
         f"min_flow={min_flow} max_flow={max_flow} flow_delay={flow_delay}s "
         f"min_rec={min_rec}% max_rec={max_rec}% rec_delay={rec_delay}s "
-        f"tds1_cal={tds1_cal_slope}/{tds1_cal_offset} tds2_cal={tds2_cal_slope}/{tds2_cal_offset}",
+        f"tds1_cal={tds1_cal_slope}/{tds1_cal_offset} tds2_cal={tds2_cal_slope}/{tds2_cal_offset} "
+        f"pm_en={pm_en} pm_lim={pm_lim} pm_hi={pm_hi} pb_en={pb_en}",
         cooldown_sec=60,
     )
     return jsonify({"status": "ok"})
@@ -3074,6 +3240,11 @@ def _publish_device_config(
     min_rec: float = 10.0, max_rec: float = 85.0, rec_delay: int = 60,
     tds1_cal_slope: float = 0.0, tds1_cal_offset: float = 0.0,
     tds2_cal_slope: float = 0.0, tds2_cal_offset: float = 0.0,
+    pm_en: bool = False, pm_minv: float = 0.5, pm_maxv: float = 4.5,
+    pm_minb: float = 0.0, pm_maxb: float = 14.0,
+    pm_lim: bool = False, pm_hi: float = 12.0, p_fdly: int = 3,
+    pb_en: bool = False, pb_minv: float = 0.5, pb_maxv: float = 4.5,
+    pb_minb: float = 0.0, pb_maxb: float = 14.0,
 ):
     """Publish retained sensor config + process protections to the device via MQTT.
 
@@ -3103,13 +3274,29 @@ def _publish_device_config(
         "tds1_cal_offset":          tds1_cal_offset,
         "tds2_cal_slope":           tds2_cal_slope,
         "tds2_cal_offset":          tds2_cal_offset,
+        "pressure_membrane_enabled":        pm_en,
+        "pressure_membrane_min_voltage":    pm_minv,
+        "pressure_membrane_max_voltage":    pm_maxv,
+        "pressure_membrane_min_bar":        pm_minb,
+        "pressure_membrane_max_bar":        pm_maxb,
+        "pressure_membrane_limits_enabled": pm_lim,
+        "pressure_membrane_high_limit":     pm_hi,
+        "pressure_fault_delay_sec":         p_fdly,
+        "pressure_brine_enabled":           pb_en,
+        "pressure_brine_min_voltage":       pb_minv,
+        "pressure_brine_max_voltage":       pb_maxv,
+        "pressure_brine_min_bar":           pb_minb,
+        "pressure_brine_max_bar":           pb_maxb,
         "updated_at":               int(_time.time()),
     })
     mqtt_client.publish(f"fyntek/{device_id}/config", payload, retain=True)
     log.info(f"[{device_id}] Config MQTT publicada: ff1={ff1} ff2={ff2} tds_t={tds_t} "
              f"min_flow={min_flow} max_flow={max_flow} flow_delay={flow_delay}s "
              f"min_rec={min_rec}% max_rec={max_rec}% rec_delay={rec_delay}s "
-             f"tds1_cal={tds1_cal_slope}/{tds1_cal_offset} tds2_cal={tds2_cal_slope}/{tds2_cal_offset}")
+             f"tds1_cal={tds1_cal_slope}/{tds1_cal_offset} tds2_cal={tds2_cal_slope}/{tds2_cal_offset} "
+             f"pm_en={pm_en} pm_cal=({pm_minv}-{pm_maxv}V→{pm_minb}-{pm_maxb}bar) "
+             f"pm_lim={pm_lim} pm_hi={pm_hi}bar p_fdly={p_fdly}s "
+             f"pb_en={pb_en} pb_cal=({pb_minv}-{pb_maxv}V→{pb_minb}-{pb_maxb}bar)")
 
 @api.route("/api/baseline/<device_id>", methods=["GET"])
 def get_baseline(device_id):
@@ -3257,7 +3444,8 @@ def get_status(device_id):
                biz_waste_liters_today, biz_waste_pct,
                biz_risk_level, biz_risk_score,
                biz_degradation_pct, biz_degradation_days, biz_degradation_label,
-               biz_health_age_hours
+               biz_health_age_hours,
+               pressure_brine_bar, pressure_membrane_voltage, pressure_brine_voltage, delta_p_bar
         FROM device_status WHERE device_id=%s
         """,
         (device_id,)
@@ -3286,6 +3474,9 @@ def get_status(device_id):
         "state": r[0],         "last_severity": r[1],
         "diag_code": r[2],     "diag_message": r[3],   "diag_action": r[4],
         "flow_permeate_lpm": r[5], "pressure": r[6],
+        "pressure_brine_bar": r[27],
+        "pressure_membrane_voltage": r[28], "pressure_brine_voltage": r[29],
+        "delta_p_bar": r[30],
         "recovery": r[7],      "efficiency": r[8],
         "last_seen": str(last_seen_dt) if last_seen_dt else None,
         "online": online,
@@ -3860,6 +4051,9 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
 .cfg-field input{width:100%;background:#0f1117;border:1px solid #2d3348;color:#e2e8f0;
   padding:.45rem .65rem;border-radius:6px;font-size:.85rem}
 .cfg-field input:focus{outline:none;border-color:#3b82f6}
+.cfg-field.cfg-check{display:flex;flex-direction:row;align-items:center;gap:.5rem}
+.cfg-field.cfg-check label{margin-bottom:0;flex:1}
+.cfg-field.cfg-check input{width:auto;accent-color:#7c3aed;cursor:pointer}
 .hint{font-size:.65rem;color:#334155;margin-top:.6rem}
 .alert-row{display:flex;gap:.5rem;align-items:flex-start;
   padding:.42rem 0;border-bottom:1px solid #1a1f2e}
@@ -3895,6 +4089,11 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
   <div class="seen-row">
     <span class="meta" id="b-seen">—</span>
     <span class="meta" id="b-age"></span>
+  </div>
+  <div class="seen-row" id="pressure-row" style="display:none">
+    <span class="meta">P. membrana: <b id="b-pm-bar">—</b> bar (<span id="b-pm-v">—</span> V)</span>
+    <span class="meta">P. rechazo: <b id="b-pb-bar">—</b> bar (<span id="b-pb-v">—</span> V)</span>
+    <span class="meta">ΔP: <b id="b-dp">—</b> bar</span>
   </div>
 </div>
 
@@ -3968,6 +4167,77 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
     <div class="cfg-field">
       <label>Delay falla recovery (s)</label>
       <input type="number" id="rec-delay" step="5" min="5" max="300" placeholder="60">
+    </div>
+    <div class="cfg-section">Presión — Membrana (P1)</div>
+    <div class="cfg-field cfg-check">
+      <label>Calibración habilitada</label>
+      <input type="checkbox" id="pm-en">
+    </div>
+    <div class="cfg-field cfg-check">
+      <label>Protección alta presión (FAULT)</label>
+      <input type="checkbox" id="pm-lim">
+    </div>
+    <div class="cfg-field">
+      <label>Voltaje mínimo (V)</label>
+      <input type="number" id="pm-minv" step="0.01" min="0" max="15" placeholder="0.5">
+    </div>
+    <div class="cfg-field">
+      <label>Voltaje máximo (V)</label>
+      <input type="number" id="pm-maxv" step="0.01" min="0" max="15" placeholder="4.5">
+    </div>
+    <div class="cfg-field">
+      <label>Presión mínima (bar)</label>
+      <input type="number" id="pm-minb" step="0.1" min="0" max="50" placeholder="0">
+    </div>
+    <div class="cfg-field">
+      <label>Presión máxima (bar)</label>
+      <input type="number" id="pm-maxb" step="0.1" min="0" max="50" placeholder="14">
+    </div>
+    <div class="cfg-field">
+      <label>Límite alta presión (bar)</label>
+      <input type="number" id="pm-hi" step="0.1" min="0" max="50" placeholder="12">
+    </div>
+    <div class="cfg-field">
+      <label>Delay falla presión (s)</label>
+      <input type="number" id="p-fdly" step="1" min="0" max="300" placeholder="3">
+    </div>
+    <div class="cfg-section">Presión — Rechazo (P2)</div>
+    <div class="cfg-field cfg-check">
+      <label>Calibración habilitada</label>
+      <input type="checkbox" id="pb-en">
+    </div>
+    <div class="cfg-field">
+      <label>Voltaje mínimo (V)</label>
+      <input type="number" id="pb-minv" step="0.01" min="0" max="15" placeholder="0.5">
+    </div>
+    <div class="cfg-field">
+      <label>Voltaje máximo (V)</label>
+      <input type="number" id="pb-maxv" step="0.01" min="0" max="15" placeholder="4.5">
+    </div>
+    <div class="cfg-field">
+      <label>Presión mínima (bar)</label>
+      <input type="number" id="pb-minb" step="0.1" min="0" max="50" placeholder="0">
+    </div>
+    <div class="cfg-field">
+      <label>Presión máxima (bar)</label>
+      <input type="number" id="pb-maxb" step="0.1" min="0" max="50" placeholder="14">
+    </div>
+    <div class="cfg-section">Alarmas de presión (diagnóstico, no detiene el equipo)</div>
+    <div class="cfg-field cfg-check">
+      <label>Alarma presión rechazo alta</label>
+      <input type="checkbox" id="pb-alarm-en">
+    </div>
+    <div class="cfg-field">
+      <label>Límite alarma rechazo (bar)</label>
+      <input type="number" id="pb-hi" step="0.1" min="0" max="50" placeholder="8">
+    </div>
+    <div class="cfg-field cfg-check">
+      <label>Alarma ΔP elevado</label>
+      <input type="checkbox" id="dp-alarm-en">
+    </div>
+    <div class="cfg-field">
+      <label>Límite alarma ΔP (bar)</label>
+      <input type="number" id="dp-alarm-lim" step="0.1" min="0" max="50" placeholder="5">
     </div>
     <div class="cfg-section">KPIs operacionales</div>
     <div class="cfg-field">
@@ -4160,6 +4430,18 @@ async function poll(){
         ageEl.textContent  = '';
       }
 
+      const pRow = document.getElementById('pressure-row');
+      if(s.pressure_membrane_bar != null || s.pressure_brine_bar != null){
+        pRow.style.display = '';
+        document.getElementById('b-pm-bar').textContent = s.pressure_membrane_bar != null ? s.pressure_membrane_bar.toFixed(2) : '—';
+        document.getElementById('b-pm-v').textContent   = s.pressure_membrane_voltage != null ? s.pressure_membrane_voltage.toFixed(2) : '—';
+        document.getElementById('b-pb-bar').textContent = s.pressure_brine_bar != null ? s.pressure_brine_bar.toFixed(2) : '—';
+        document.getElementById('b-pb-v').textContent   = s.pressure_brine_voltage != null ? s.pressure_brine_voltage.toFixed(2) : '—';
+        document.getElementById('b-dp').textContent     = s.delta_p_bar != null ? s.delta_p_bar.toFixed(2) : '—';
+      } else {
+        pRow.style.display = 'none';
+      }
+
       updateButtons();
     }
   } catch(e){}
@@ -4236,6 +4518,23 @@ async function loadConfig(){
     document.getElementById('pump-kw').value  = c.pump_power_kw       ?? '';
     document.getElementById('cost-kwh').value = c.cost_kwh            ?? '';
     document.getElementById('daily-l').value  = c.daily_target_liters ?? '';
+    document.getElementById('pm-en').checked   = !!c.pressure_membrane_enabled;
+    document.getElementById('pm-minv').value   = c.pressure_membrane_min_voltage   ?? '';
+    document.getElementById('pm-maxv').value   = c.pressure_membrane_max_voltage   ?? '';
+    document.getElementById('pm-minb').value   = c.pressure_membrane_min_bar       ?? '';
+    document.getElementById('pm-maxb').value   = c.pressure_membrane_max_bar       ?? '';
+    document.getElementById('pm-lim').checked  = !!c.pressure_membrane_limits_enabled;
+    document.getElementById('pm-hi').value     = c.pressure_membrane_high_limit    ?? '';
+    document.getElementById('p-fdly').value    = c.pressure_fault_delay_sec        ?? '';
+    document.getElementById('pb-en').checked   = !!c.pressure_brine_enabled;
+    document.getElementById('pb-minv').value   = c.pressure_brine_min_voltage      ?? '';
+    document.getElementById('pb-maxv').value   = c.pressure_brine_max_voltage      ?? '';
+    document.getElementById('pb-minb').value   = c.pressure_brine_min_bar          ?? '';
+    document.getElementById('pb-maxb').value   = c.pressure_brine_max_bar          ?? '';
+    document.getElementById('pb-hi').value     = c.pressure_brine_high_limit       ?? '';
+    document.getElementById('pb-alarm-en').checked = !!c.pressure_brine_alarm_enabled;
+    document.getElementById('dp-alarm-en').checked = !!c.delta_p_alarm_enabled;
+    document.getElementById('dp-alarm-lim').value   = c.delta_p_alarm_limit        ?? '';
   } catch(e){}
 }
 
@@ -4258,6 +4557,23 @@ async function saveConfig(){
     pump_power_kw:            parseFloat(document.getElementById('pump-kw').value)    || 0.75,
     cost_kwh:            parseFloat(document.getElementById('cost-kwh').value) || 0.12,
     daily_target_liters: parseFloat(document.getElementById('daily-l').value)  || 0,
+    pressure_membrane_enabled:        document.getElementById('pm-en').checked,
+    pressure_membrane_min_voltage:    parseFloat(document.getElementById('pm-minv').value) || 0.5,
+    pressure_membrane_max_voltage:    parseFloat(document.getElementById('pm-maxv').value) || 4.5,
+    pressure_membrane_min_bar:        parseFloat(document.getElementById('pm-minb').value) || 0,
+    pressure_membrane_max_bar:        parseFloat(document.getElementById('pm-maxb').value) || 14,
+    pressure_membrane_limits_enabled: document.getElementById('pm-lim').checked,
+    pressure_membrane_high_limit:     parseFloat(document.getElementById('pm-hi').value)   || 12,
+    pressure_fault_delay_sec:         parseInt(document.getElementById('p-fdly').value)    || 3,
+    pressure_brine_enabled:           document.getElementById('pb-en').checked,
+    pressure_brine_min_voltage:       parseFloat(document.getElementById('pb-minv').value) || 0.5,
+    pressure_brine_max_voltage:       parseFloat(document.getElementById('pb-maxv').value) || 4.5,
+    pressure_brine_min_bar:           parseFloat(document.getElementById('pb-minb').value) || 0,
+    pressure_brine_max_bar:           parseFloat(document.getElementById('pb-maxb').value) || 14,
+    pressure_brine_high_limit:        parseFloat(document.getElementById('pb-hi').value)   || 8,
+    pressure_brine_alarm_enabled:     document.getElementById('pb-alarm-en').checked,
+    delta_p_alarm_enabled:            document.getElementById('dp-alarm-en').checked,
+    delta_p_alarm_limit:              parseFloat(document.getElementById('dp-alarm-lim').value) || 5,
   };
   try {
     const r = await fetch('/api/config/'+dev(), {
@@ -4467,6 +4783,33 @@ def main():
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds1_cal_offset FLOAT DEFAULT 0.0")
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds2_cal_slope  FLOAT DEFAULT 0.0")
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS tds2_cal_offset FLOAT DEFAULT 0.0")
+    # Calibración de presión (voltaje→bar), por canal — sincronizada con firmware vía /config
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_membrane_enabled        BOOLEAN DEFAULT FALSE")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_membrane_min_voltage    FLOAT   DEFAULT 0.5")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_membrane_max_voltage    FLOAT   DEFAULT 4.5")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_membrane_min_bar        FLOAT   DEFAULT 0.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_membrane_max_bar        FLOAT   DEFAULT 14.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_membrane_limits_enabled BOOLEAN DEFAULT FALSE")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_membrane_high_limit     FLOAT   DEFAULT 12.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_fault_delay_sec         INTEGER DEFAULT 3")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_brine_enabled           BOOLEAN DEFAULT FALSE")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_brine_min_voltage       FLOAT   DEFAULT 0.5")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_brine_max_voltage       FLOAT   DEFAULT 4.5")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_brine_min_bar           FLOAT   DEFAULT 0.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_brine_max_bar           FLOAT   DEFAULT 14.0")
+    # Alarmas diagnósticas backend-only (NO se publican a firmware)
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_brine_high_limit        FLOAT   DEFAULT 8.0")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS pressure_brine_alarm_enabled     BOOLEAN DEFAULT FALSE")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS delta_p_alarm_enabled            BOOLEAN DEFAULT FALSE")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS delta_p_alarm_limit              FLOAT   DEFAULT 5.0")
+    # Telemetría de presión — voltaje por canal + delta_p (membrana-brine)
+    db.execute("ALTER TABLE telemetry_process ADD COLUMN IF NOT EXISTS pressure_membrane_voltage FLOAT")
+    db.execute("ALTER TABLE telemetry_process ADD COLUMN IF NOT EXISTS pressure_brine_voltage    FLOAT")
+    db.execute("ALTER TABLE telemetry_process ADD COLUMN IF NOT EXISTS delta_p_bar               FLOAT")
+    db.execute("ALTER TABLE device_status ADD COLUMN IF NOT EXISTS pressure_brine_bar        FLOAT")
+    db.execute("ALTER TABLE device_status ADD COLUMN IF NOT EXISTS pressure_membrane_voltage FLOAT")
+    db.execute("ALTER TABLE device_status ADD COLUMN IF NOT EXISTS pressure_brine_voltage    FLOAT")
+    db.execute("ALTER TABLE device_status ADD COLUMN IF NOT EXISTS delta_p_bar               FLOAT")
     log.info("✅ Schema migrations aplicadas")
 
     # Pre-populate tracker from DB so panels show correct state after restart

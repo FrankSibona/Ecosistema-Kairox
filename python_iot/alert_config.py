@@ -74,6 +74,9 @@ RULE_CONFIG = {
     "LOW_EFFICIENCY":   {"trigger_seconds": 60,  "clear_seconds": 120},
     "SENSOR_INVALID":   {"trigger_seconds": 10,  "clear_seconds": 30},
     "RESIDUAL_FLOW_STOPPED": {"trigger_seconds": 60, "clear_seconds": 30},  # avoid normal post-stop depressurization (~10-30s)
+    "MEMBRANE_HIGH_PRESSURE_ALARM": {"trigger_seconds": 30, "clear_seconds": 60},
+    "BRINE_HIGH_PRESSURE_ALARM":    {"trigger_seconds": 30, "clear_seconds": 60},
+    "DELTA_P_ALARM":                {"trigger_seconds": 60, "clear_seconds": 120},
 }
 _DEFAULT_RULE = {"trigger_seconds": 60, "clear_seconds": 120}
 
