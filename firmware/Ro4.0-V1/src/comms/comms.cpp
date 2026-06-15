@@ -96,7 +96,7 @@ static RuleConfig parseRuleEntry(JsonObject obj) {
             LogicalInput in = logicalInputFromName(signal);
             if (in == LogicalInput::COUNT) continue;
             sigId = (uint8_t)in;
-            src   = SignalSrc::INPUT;
+            src   = SignalSrc::SIG_INPUT;
         }
 
         out.terms[out.term_count] = { sigId, src, (uint8_t)((t["negate"] | false) ? 1 : 0) };

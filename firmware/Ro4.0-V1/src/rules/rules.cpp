@@ -82,13 +82,13 @@ static RulesConfig defaultRules() {
     // exactamente la condición actual `if (!crudoOK || ...)`. pressure_ok NO
     // participa — sigue siendo condición interna de la FSM (presionOK).
     cfg.process_permits[(uint8_t)ProcessId::RO] = RuleConfig{
-        RuleOp::AND, 1, { RuleTerm{(uint8_t)LogicalInput::RAW_WATER_AVAILABLE, SignalSrc::INPUT, 0} }
+        RuleOp::AND, 1, { RuleTerm{(uint8_t)LogicalInput::RAW_WATER_AVAILABLE, SignalSrc::SIG_INPUT, 0} }
     };
 
     // independent_outputs["well_pump"] = OR(well_low_level) — reproduce
     // exactamente el control directo D5->R3 actual.
     cfg.independent_outputs[(uint8_t)LogicalOutput::WELL_PUMP] = RuleConfig{
-        RuleOp::OR, 1, { RuleTerm{(uint8_t)LogicalInput::WELL_LOW_LEVEL, SignalSrc::INPUT, 0} }
+        RuleOp::OR, 1, { RuleTerm{(uint8_t)LogicalInput::WELL_LOW_LEVEL, SignalSrc::SIG_INPUT, 0} }
     };
 
     cfg.fault_rule_count = 0;  // sin fault_rules por defecto
@@ -139,7 +139,7 @@ static bool validRuleConfig(const RuleConfig& r) {
     for (uint8_t i = 0; i < r.term_count; i++) {
         const RuleTerm& t = r.terms[i];
         if ((uint8_t)t.source > (uint8_t)SignalSrc::DERIVED) return false;
-        if (t.source == SignalSrc::INPUT   && t.signal_id >= (uint8_t)LogicalInput::COUNT)   return false;
+        if (t.source == SignalSrc::SIG_INPUT && t.signal_id >= (uint8_t)LogicalInput::COUNT)   return false;
         if (t.source == SignalSrc::DERIVED && t.signal_id >= (uint8_t)DerivedSignal::COUNT)  return false;
         if (t.negate > 1) return false;
     }
@@ -196,7 +196,7 @@ bool evalRule(const RuleConfig& r,
     for (uint8_t i = 0; i < r.term_count && i < RULE_MAX_TERMS; i++) {
         const RuleTerm& t = r.terms[i];
         bool v;
-        if (t.source == SignalSrc::INPUT) {
+        if (t.source == SignalSrc::SIG_INPUT) {
             v = (t.signal_id < (uint8_t)LogicalInput::COUNT) ? inputs[t.signal_id] : false;
         } else {
             v = (t.signal_id < (uint8_t)DerivedSignal::COUNT) ? derived[t.signal_id] : false;

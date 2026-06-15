@@ -35,7 +35,7 @@
 #define RULE_MAX_TERMS 4
 
 enum class RuleOp : uint8_t { AND = 0, OR = 1 };
-enum class SignalSrc : uint8_t { INPUT = 0, DERIVED = 1 };
+enum class SignalSrc : uint8_t { SIG_INPUT = 0, DERIVED = 1 };
 
 // Procesos del sistema — hoy solo "ro". Append-only, igual criterio que
 // LogicalInput/LogicalOutput.
