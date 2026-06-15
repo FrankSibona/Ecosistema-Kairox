@@ -526,3 +526,10 @@ bool Sensors::getNivelBajoPozo() { return d5; }
 bool Sensors::demanda()          { return d1; }
 bool Sensors::crudoDisponible()  { return d2; }
 bool Sensors::presionOK()        { return d4; }
+
+bool Sensors::readSignal(LogicalInput sig) const {
+    const IOPinConfig& e = ioMapGet().inputs[(uint8_t)sig];
+    if (e.gpio == IOMAP_GPIO_NONE) return false;
+    bool raw = digitalRead(e.gpio);
+    return e.invert ? !raw : raw;
+}

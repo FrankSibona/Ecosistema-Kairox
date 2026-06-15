@@ -92,7 +92,19 @@
 // CFG_VERSION: si no coinciden, se descarta lo guardado y se usa el mapeo por
 // defecto (reproduce el wiring actual D1-D6/R1-R6, ver defaultIOMap()).
 #define IOMAP_MAGIC   0x4B584D41U  // 'K','X','M','A' — identifica el blob io_map
-#define IOMAP_VERSION 1U           // incrementar ante cambios de catálogo/struct
+#define IOMAP_VERSION 2U           // v2: LogicalInput::COUNT 12->15 (permeate_tank_demand,
+                                    // final_tank_demand, phase_failure) cambia sizeof(IOMapConfig).
+                                    // Bump fuerza fallback a defaultIOMap() en equipos con NVS v1,
+                                    // con log explícito (en vez de fallo silencioso por tamaño).
+
+// ── NVS rules integrity ───────────────────────────────────────────────────────
+// RULES_MAGIC/RULES_VERSION cubren el blob del motor de reglas (process_permits/
+// independent_outputs/fault_rules) en NVS namespace "kx_rules" (ver
+// src/rules/rules.h). Mismo patrón que IOMAP_MAGIC/IOMAP_VERSION: si no
+// coinciden, se descarta lo guardado y se usan los defaults (defaultRules(),
+// reproducen el comportamiento actual sin reglas configuradas).
+#define RULES_MAGIC   0x4B58524CU  // 'K','X','R','L' — identifica el blob rules
+#define RULES_VERSION 1U           // incrementar ante cambios de catálogo/struct
 
 // ================= FSM =================
 #define LOW_PUMP_FILL_TIME   10000

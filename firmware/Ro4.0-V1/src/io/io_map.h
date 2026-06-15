@@ -41,9 +41,23 @@ void ioMapInit();
 
 const IOMapConfig& ioMapGet();
 
+// Aplica pinMode() a cada señal con gpio asignado (!= IOMAP_GPIO_NONE) según
+// su modo (inputs: IOMAP_MODE_PULLUP/PULLDOWN: outputs: OUTPUT). Llamar una
+// vez en setup(), después de ioMapInit(). Para D1-D6/R1-R6 duplica el
+// pinMode() ya hecho en Sensors::begin()/Control::begin() — idempotente, sin
+// efecto. Para señales nuevas (sin PIN_* fijo) es lo único necesario para que
+// readSignal()/digitalWrite() funcionen.
+void ioMapApplyPinModes();
+
 // Aplica un mapeo entrante (partial update por señal: entradas ausentes o
 // inválidas conservan el valor actual). Si incoming.updated_at > 0 y es
 // <= al valor actual, el mensaje completo se ignora (mismo patrón que
 // Sensors::setConfig). Persiste en NVS si se aplica.
+//
+// Reload en caliente: para cada señal que pasa de IOMAP_GPIO_NONE a un GPIO
+// real, llama pinMode() inmediatamente (sin esperar reboot). Reasignar un
+// pin YA configurado (cambiar GPIO/mode/invert de una señal que ya tenía
+// pin) sigue requiriendo power-cycle.
+//
 // Retorna true si se aplicó (y persistió) el cambio.
 bool ioMapSet(const IOMapConfig& incoming);

@@ -1,5 +1,6 @@
 #include "control.h"
 #include <config.h>
+#include <string.h>
 
 // ================= SETUP =================
 void Control::begin() {
@@ -49,14 +50,7 @@ unsigned long Control::getRecoveryFaultElapsedMs() const {
 }
 
 const char* Control::getFaultReasonName() {
-    switch (faultReason) {
-        case FaultReason::MAX_RETRIES:   return "MAX_RETRIES";
-        case FaultReason::FLOW_LOW:      return "FLOW_LOW";
-        case FaultReason::RECOVERY_LOW:  return "RECOVERY_LOW";
-        case FaultReason::RECOVERY_HIGH: return "RECOVERY_HIGH";
-        case FaultReason::PRESSURE_MEMBRANE_HIGH: return "PRESSURE_MEMBRANE_HIGH";
-        default:                         return "";
-    }
+    return faultReasonName(faultReason);
 }
 
 const char* Control::getStateName() {
@@ -126,7 +120,7 @@ void Control::stopAll() {
 
 // ================= FSM =================
 
-void Control::update(Sensors &s, Commands &cmds) {
+void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const bool* ruleDerived) {
 
     // ===== COMMAND ENGINE =====
     // Remote commands are processed first so they take effect this iteration.
@@ -193,6 +187,7 @@ void Control::update(Sensors &s, Commands &cmds) {
             if (!crudoOK) {
                 Serial.println("[FAULT] Sin agua de crudo");
                 pMembraneHighArmed = false;
+                for (uint8_t i = 0; i < FAULT_RULES_MAX; i++) faultRuleArmed[i] = false;
                 state = IDLE;
                 break;
             }
@@ -211,12 +206,14 @@ void Control::update(Sensors &s, Commands &cmds) {
                     retryCount++;
                     Serial.println("[FAULT] Presión no alcanzada");
                     pMembraneHighArmed = false;
+                    for (uint8_t i = 0; i < FAULT_RULES_MAX; i++) faultRuleArmed[i] = false;
                     state = IDLE;
                     retryTimer = millis();
                 }
             }
 
             checkMembraneHighPressure(s);
+            checkFaultRules(ruleInputs, ruleDerived);
             break;
 
         case PRODUCING:
@@ -228,22 +225,41 @@ void Control::update(Sensors &s, Commands &cmds) {
                 flowFaultArmed     = false;
                 recoveryFaultArmed = false;
                 pMembraneHighArmed = false;
+                for (uint8_t i = 0; i < FAULT_RULES_MAX; i++) faultRuleArmed[i] = false;
                 state = FLUSHING;
                 stateStartTime = millis();
                 break;
             }
 
-            if (!crudoOK || !presionOK) {
-                Serial.println("[FAULT] Pérdida condición");
-                flowFaultArmed     = false;
-                recoveryFaultArmed = false;
-                pMembraneHighArmed = false;
-                state = IDLE;
-                break;
+            // process_permits["ro"] — condiciones EXTERNAS de operación (demanda,
+            // interlocks, niveles). RAW_WATER_AVAILABLE usa el valor debounced de la
+            // FSM (compat con default = AND(raw_water_available)); el resto (incl.
+            // señales nuevas Chamico) usa ruleInputs[] crudo (io_map). pressure_ok NO
+            // participa del permit — sigue siendo condición interna de la FSM
+            // (presionOK, abajo).
+            {
+                bool permitInputs[(uint8_t)LogicalInput::COUNT];
+                memcpy(permitInputs, ruleInputs, sizeof(permitInputs));
+                permitInputs[(uint8_t)LogicalInput::RAW_WATER_AVAILABLE] = crudoOK;
+
+                bool permitOk = evalRule(rulesGet().process_permits[(uint8_t)ProcessId::RO], permitInputs, ruleDerived);
+
+                if (!permitOk || !presionOK) {
+                    Serial.println("[FAULT] Pérdida condición");
+                    flowFaultArmed     = false;
+                    recoveryFaultArmed = false;
+                    pMembraneHighArmed = false;
+                    for (uint8_t i = 0; i < FAULT_RULES_MAX; i++) faultRuleArmed[i] = false;
+                    state = IDLE;
+                    break;
+                }
             }
 
             // ── Protección de presión de membrana alta (única protección crítica V1) ──
             if (checkMembraneHighPressure(s)) break;
+
+            // ── fault_rules[] configurables por instalación (ej. phase_failure) ──
+            if (checkFaultRules(ruleInputs, ruleDerived)) break;
 
             // ── Protección de caudal de permeado ─────────────────────────────
             {
@@ -331,12 +347,23 @@ void Control::update(Sensors &s, Commands &cmds) {
         state = FAULT;
     }
 
-    // ===== BOMBA DE POZO — control directo, independiente del FSM =====
-    // D5 HIGH (flotante nivel bajo activo) → PIN_R3 ON
-    // D5 LOW  (cisterna llena)             → PIN_R3 OFF
-    bool nivelBajo = s.getNivelBajoPozo();
-    outputs.pumpInlet = nivelBajo;
-    digitalWrite(PIN_R3, nivelBajo);
+    // ===== INDEPENDENT OUTPUTS — evaluadas cada loop, fuera del switch(state) =====
+    bool indOut[(uint8_t)LogicalOutput::COUNT];
+    for (uint8_t i = 0; i < (uint8_t)LogicalOutput::COUNT; i++) {
+        indOut[i] = evalRule(rulesGet().independent_outputs[i], ruleInputs, ruleDerived);
+    }
+
+    // well_pump — reemplaza el control directo D5->R3. Default reproduce EXACTO
+    // el comportamiento actual: independent_outputs["well_pump"] = OR(well_low_level).
+    outputs.pumpInlet = indOut[(uint8_t)LogicalOutput::WELL_PUMP];
+    digitalWrite(PIN_R3, outputs.pumpInlet);
+
+    // transfer_pump — sin PIN_R* fijo; usa el GPIO de io_map si está asignado
+    // (Chamico/lab). Sin asignar -> sin efecto (no se llama digitalWrite).
+    const IOPinConfig& transferOut = ioMapGet().outputs[(uint8_t)LogicalOutput::TRANSFER_PUMP];
+    if (transferOut.gpio != IOMAP_GPIO_NONE) {
+        digitalWrite(transferOut.gpio, indOut[(uint8_t)LogicalOutput::TRANSFER_PUMP]);
+    }
 
     // Fire the fault event flag for exactly one iteration when FSM enters FAULT.
     // lastState still holds the pre-switch value here — updated next iteration.
@@ -372,6 +399,36 @@ bool Control::checkMembraneHighPressure(Sensors& s) {
         }
     } else {
         pMembraneHighArmed = false;
+    }
+    return false;
+}
+
+// fault_rules[] configurables por instalación (ver src/rules/rules.h).
+// Generaliza el patrón arm/timer de checkMembraneHighPressure() para
+// condiciones de falla nuevas por instalación (ej. phase_failure, Chamico).
+// Con fault_rule_count==0 (default) es un no-op.
+bool Control::checkFaultRules(const bool* ruleInputs, const bool* ruleDerived) {
+    const RulesConfig& r = rulesGet();
+    for (uint8_t i = 0; i < r.fault_rule_count && i < FAULT_RULES_MAX; i++) {
+        const FaultRuleConfig& fr = r.fault_rules[i];
+        if (fr.reason == FaultReason::NONE) continue;
+
+        unsigned long delayMs = (unsigned long)fr.delay_sec * 1000UL;
+
+        if (evalRule(fr.condition, ruleInputs, ruleDerived)) {
+            if (!faultRuleArmed[i]) {
+                faultRuleTimer[i] = millis();
+                faultRuleArmed[i] = true;
+            } else if (millis() - faultRuleTimer[i] >= delayMs) {
+                Serial.printf("[FAULT] fault_rules[%u] -> %s\n", i, faultReasonName(fr.reason));
+                faultReason       = fr.reason;
+                faultRuleArmed[i] = false;
+                state             = FAULT;
+                return true;
+            }
+        } else {
+            faultRuleArmed[i] = false;
+        }
     }
     return false;
 }
@@ -420,6 +477,7 @@ void Control::applyCommand(CommandType cmd) {
             flowFaultArmed     = false;
             recoveryFaultArmed = false;
             pMembraneHighArmed = false;
+            for (uint8_t i = 0; i < FAULT_RULES_MAX; i++) faultRuleArmed[i] = false;
             state              = IDLE;
             break;
         default:

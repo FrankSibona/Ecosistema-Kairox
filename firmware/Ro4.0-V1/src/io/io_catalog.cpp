@@ -14,6 +14,9 @@ static const char* INPUT_NAMES[(uint8_t)LogicalInput::COUNT] = {
     "softener_regenerating",
     "well_low_level",
     "dosing_ok",
+    "permeate_tank_demand",
+    "final_tank_demand",
+    "phase_failure",
 };
 
 static const char* OUTPUT_NAMES[(uint8_t)LogicalOutput::COUNT] = {
@@ -24,6 +27,10 @@ static const char* OUTPUT_NAMES[(uint8_t)LogicalOutput::COUNT] = {
     "flush_valve",
     "inlet_valve",
     "dosing_pump",
+};
+
+static const char* DERIVED_NAMES[(uint8_t)DerivedSignal::COUNT] = {
+    "ro_producing",
 };
 
 const char* logicalInputName(LogicalInput sig) {
@@ -48,4 +55,16 @@ LogicalOutput logicalOutputFromName(const char* name) {
         if (strcmp(name, OUTPUT_NAMES[i]) == 0) return (LogicalOutput)i;
     }
     return LogicalOutput::COUNT;
+}
+
+const char* derivedSignalName(DerivedSignal sig) {
+    uint8_t i = (uint8_t)sig;
+    return (i < (uint8_t)DerivedSignal::COUNT) ? DERIVED_NAMES[i] : "";
+}
+
+DerivedSignal derivedSignalFromName(const char* name) {
+    for (uint8_t i = 0; i < (uint8_t)DerivedSignal::COUNT; i++) {
+        if (strcmp(name, DERIVED_NAMES[i]) == 0) return (DerivedSignal)i;
+    }
+    return DerivedSignal::COUNT;
 }

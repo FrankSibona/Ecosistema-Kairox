@@ -7,6 +7,7 @@
 #include "diag/flight_recorder.h"
 #include "safety/watchdog.h"
 #include "io/io_map.h"
+#include "rules/rules.h"
 
 Sensors       sensors;
 Control       control;
@@ -23,7 +24,9 @@ void setup() {
 
     sensors.begin();
     control.begin();
-    ioMapInit();  // carga mapeo Pin<->Señal desde NVS — sin efectos sobre GPIO
+    ioMapInit();          // carga mapeo Pin<->Señal desde NVS — sin efectos sobre GPIO
+    ioMapApplyPinModes(); // aplica pinMode() según io_map (idempotente para D1-D6/R1-R6)
+    rulesInit();          // carga motor de reglas desde NVS (process_permits/independent_outputs/fault_rules)
     commands.begin();
     comms.begin(commands, sensors, diagMode, flightRec);
 
@@ -35,8 +38,17 @@ void loop() {
     // 1. Sensores
     sensors.update();
 
+    // 1b. Motor de reglas — snapshot de señales del loop actual (1-tick lag
+    // para derivadas, por diseño: ro_producing refleja el estado previo).
+    bool ruleInputs[(uint8_t)LogicalInput::COUNT];
+    for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
+        ruleInputs[i] = sensors.readSignal((LogicalInput)i);
+    }
+    bool ruleDerived[(uint8_t)DerivedSignal::COUNT];
+    computeDerivedSignals(ruleDerived, control);
+
     // 2. Control + Command Engine (CRÍTICO)
-    control.update(sensors, commands);
+    control.update(sensors, commands, ruleInputs, ruleDerived);
 
     // 3. Comunicaciones — procesa callbacks MQTT y publica ACK pendiente
     comms.update(sensors, control, commands, diagMode, flightRec);

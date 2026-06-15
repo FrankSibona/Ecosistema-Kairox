@@ -28,6 +28,9 @@ enum class LogicalInput : uint8_t {
     SOFTENER_REGENERATING,  // ablandador en regeneración (interlock)
     WELL_LOW_LEVEL,         // pozo: nivel bajo
     DOSING_OK,              // dosificación OK
+    PERMEATE_TANK_DEMAND,   // demanda desde tanque de permeado (arranque RO)
+    FINAL_TANK_DEMAND,      // demanda desde tanque final (bomba transferencia)
+    PHASE_FAILURE,          // falla de fase — protección propia RO (fault_rules[])
     COUNT
 };
 
@@ -42,11 +45,21 @@ enum class LogicalOutput : uint8_t {
     COUNT
 };
 
+// Señales derivadas — no vienen de io_map/GPIO, se calculan cada loop desde
+// el estado de un proceso (sección 2 de KAIROX_ARQUITECTURA_SENALES_REGLAS.md).
+// Mismo criterio append-only que LogicalInput/LogicalOutput.
+enum class DerivedSignal : uint8_t {
+    RO_PRODUCING = 0,   // Control::isRunning()
+    COUNT
+};
+
 // Nombres estables (claves JSON/NVS) — deben coincidir con
-// python_iot/io_catalog.py (LOGICAL_INPUTS / LOGICAL_OUTPUTS).
+// python_iot/io_catalog.py (LOGICAL_INPUTS / LOGICAL_OUTPUTS / DERIVED_SIGNALS).
 const char* logicalInputName(LogicalInput sig);
 const char* logicalOutputName(LogicalOutput sig);
+const char* derivedSignalName(DerivedSignal sig);
 
 // Devuelven *_::COUNT si el nombre no está en el catálogo.
 LogicalInput  logicalInputFromName(const char* name);
 LogicalOutput logicalOutputFromName(const char* name);
+DerivedSignal derivedSignalFromName(const char* name);

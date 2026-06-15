@@ -71,6 +71,18 @@ const IOMapConfig& ioMapGet() {
     return _cfg;
 }
 
+void ioMapApplyPinModes() {
+    const IOMapConfig& m = ioMapGet();
+    for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
+        if (m.inputs[i].gpio == IOMAP_GPIO_NONE) continue;
+        pinMode(m.inputs[i].gpio, m.inputs[i].mode == IOMAP_MODE_PULLDOWN ? INPUT_PULLDOWN : INPUT_PULLUP);
+    }
+    for (uint8_t i = 0; i < (uint8_t)LogicalOutput::COUNT; i++) {
+        if (m.outputs[i].gpio == IOMAP_GPIO_NONE) continue;
+        pinMode(m.outputs[i].gpio, OUTPUT);
+    }
+}
+
 static bool validInputEntry(const IOPinConfig& e) {
     if (e.gpio != IOMAP_GPIO_NONE && e.gpio > 39) return false;
     if (e.mode != IOMAP_MODE_PULLUP && e.mode != IOMAP_MODE_PULLDOWN) return false;
@@ -91,6 +103,8 @@ bool ioMapSet(const IOMapConfig& incoming) {
         return false;
     }
 
+    IOMapConfig before = _cfg;
+
     for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
         if (validInputEntry(incoming.inputs[i])) {
             _cfg.inputs[i] = incoming.inputs[i];
@@ -109,5 +123,23 @@ bool ioMapSet(const IOMapConfig& incoming) {
 
     ioMapSave();
     Serial.printf("[IOMAP] Guardado en NVS — updated_at=%u\n", (unsigned)_cfg.updated_at);
+
+    // Reload en caliente: aplica pinMode() solo a señales que pasan de "sin
+    // pin" (IOMAP_GPIO_NONE) a un GPIO real. Evita reconfigurar pines ya
+    // activos (D1-D6/R1-R6 en producción) — reasignar un pin YA usado sigue
+    // requiriendo reboot.
+    for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
+        if (before.inputs[i].gpio == IOMAP_GPIO_NONE && _cfg.inputs[i].gpio != IOMAP_GPIO_NONE) {
+            pinMode(_cfg.inputs[i].gpio, _cfg.inputs[i].mode == IOMAP_MODE_PULLDOWN ? INPUT_PULLDOWN : INPUT_PULLUP);
+            Serial.printf("[IOMAP] pinMode aplicado en caliente: input[%u] -> GPIO%u\n", i, _cfg.inputs[i].gpio);
+        }
+    }
+    for (uint8_t i = 0; i < (uint8_t)LogicalOutput::COUNT; i++) {
+        if (before.outputs[i].gpio == IOMAP_GPIO_NONE && _cfg.outputs[i].gpio != IOMAP_GPIO_NONE) {
+            pinMode(_cfg.outputs[i].gpio, OUTPUT);
+            Serial.printf("[IOMAP] pinMode aplicado en caliente: output[%u] -> GPIO%u\n", i, _cfg.outputs[i].gpio);
+        }
+    }
+
     return true;
 }

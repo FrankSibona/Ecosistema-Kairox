@@ -14,6 +14,7 @@
 #include "../diag/flight_recorder.h"
 #include "../io/io_map.h"
 #include "../io/io_catalog.h"
+#include "../rules/rules.h"
 #include <config.h>
 
 // ================= DEVICE ID =================
@@ -62,6 +63,44 @@ static IOPinConfig parseIOEntry(JsonObject obj, const IOPinConfig& cur, bool has
     }
     if (obj.containsKey("invert")) {
         out.invert = (obj["invert"].as<int>() != 0) ? 1 : 0;
+    }
+    return out;
+}
+
+// Parsea {"op":"AND"|"OR","terms":[{"signal":"...","source":"input"|"derived","negate":bool}]}
+// hacia una RuleConfig. "op" desconocido/ausente -> OR. Términos con
+// signal/source desconocidos se ignoran (igual criterio que parseIOEntry);
+// más de RULE_MAX_TERMS términos -> los excedentes se ignoran.
+static RuleConfig parseRuleEntry(JsonObject obj) {
+    RuleConfig out = { RuleOp::OR, 0, {} };
+
+    const char* op = obj["op"] | "OR";
+    out.op = (strcmp(op, "AND") == 0) ? RuleOp::AND : RuleOp::OR;
+
+    JsonArray terms = obj["terms"].as<JsonArray>();
+    for (JsonVariant v : terms) {
+        if (out.term_count >= RULE_MAX_TERMS) break;
+        JsonObject t = v.as<JsonObject>();
+
+        const char* signal = t["signal"] | "";
+        const char* source = t["source"] | "input";
+
+        uint8_t   sigId;
+        SignalSrc src;
+        if (strcmp(source, "derived") == 0) {
+            DerivedSignal d = derivedSignalFromName(signal);
+            if (d == DerivedSignal::COUNT) continue;
+            sigId = (uint8_t)d;
+            src   = SignalSrc::DERIVED;
+        } else {
+            LogicalInput in = logicalInputFromName(signal);
+            if (in == LogicalInput::COUNT) continue;
+            sigId = (uint8_t)in;
+            src   = SignalSrc::INPUT;
+        }
+
+        out.terms[out.term_count] = { sigId, src, (uint8_t)((t["negate"] | false) ? 1 : 0) };
+        out.term_count++;
     }
     return out;
 }
@@ -184,6 +223,62 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
+    // ── /rules ───────────────────────────────────────────────────────────────
+    // Retained: motor de reglas (process_permits / independent_outputs /
+    // fault_rules). Partial update por categoría/slot — claves ausentes
+    // conservan los valores actuales (mismo patrón que /iomap).
+    char rules_topic[68];
+    snprintf(rules_topic, sizeof(rules_topic), "fyntek/%s/rules", device_id.c_str());
+    if (strcmp(topic, rules_topic) == 0) {
+        StaticJsonDocument<1536> doc;
+        DeserializationError err = deserializeJson(doc, payload, length);
+        if (err) {
+            Serial.print("[RULES] JSON inválido: ");
+            Serial.println(err.c_str());
+            return;
+        }
+
+        RulesConfig incoming = rulesGet();
+
+        JsonObject permits = doc["process_permits"].as<JsonObject>();
+        for (JsonPair kv : permits) {
+            ProcessId p = processFromName(kv.key().c_str());
+            if (p == ProcessId::COUNT) continue;
+            incoming.process_permits[(uint8_t)p] = parseRuleEntry(kv.value().as<JsonObject>());
+        }
+
+        JsonObject outs = doc["independent_outputs"].as<JsonObject>();
+        for (JsonPair kv : outs) {
+            LogicalOutput o = logicalOutputFromName(kv.key().c_str());
+            if (o == LogicalOutput::COUNT) continue;
+            incoming.independent_outputs[(uint8_t)o] = parseRuleEntry(kv.value().as<JsonObject>());
+        }
+
+        // fault_rules ausente -> no se modifica fault_rules/fault_rule_count
+        // actuales (incoming ya es una copia de rulesGet()).
+        JsonArray faults = doc["fault_rules"].as<JsonArray>();
+        if (!faults.isNull()) {
+            uint8_t n = 0;
+            for (JsonVariant v : faults) {
+                if (n >= FAULT_RULES_MAX) break;
+                JsonObject fr = v.as<JsonObject>();
+
+                FaultReason reason = faultReasonFromName(fr["reason"] | "");
+                if (reason == FaultReason::NONE) continue;  // entrada inválida — se descarta
+
+                incoming.fault_rules[n].condition = parseRuleEntry(fr["condition"].as<JsonObject>());
+                incoming.fault_rules[n].reason    = reason;
+                incoming.fault_rules[n].delay_sec = fr["delay_sec"] | 0U;
+                n++;
+            }
+            incoming.fault_rule_count = n;
+        }
+
+        incoming.updated_at = doc["updated_at"] | (uint32_t)0;
+        rulesSet(incoming);
+        return;
+    }
+
     // ── /diag/ctrl ───────────────────────────────────────────────────────────
     char diag_topic[72];
     snprintf(diag_topic, sizeof(diag_topic), "fyntek/%s/diag/ctrl", device_id.c_str());
@@ -219,7 +314,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "1.1.5";
+const char* fw_version = "1.1.7";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -360,6 +455,7 @@ void Comms::reconnect() {
         mqttClient.subscribe(baseTopic("config").c_str());
         mqttClient.subscribe(baseTopic("config/reset").c_str());
         mqttClient.subscribe(baseTopic("iomap").c_str());
+        mqttClient.subscribe(baseTopic("rules").c_str());
         mqttClient.subscribe(baseTopic("diag/ctrl").c_str());
         mqttClient.subscribe(baseTopic("diag/flightrec/get").c_str());
 

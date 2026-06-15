@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include <math.h>  // NAN
 #include <config.h>
+#include "io/io_map.h"
 
 // ── Sensor calibration config ────────────────────────────────────────────────
 // Pushed from backend via MQTT fyntek/{device_id}/config (retained).
@@ -116,6 +117,11 @@ public:
     bool demanda();
     bool crudoDisponible();
     bool presionOK();
+
+    // Lectura genérica vía io_map — resuelve GPIO/modo/invert para la señal
+    // lógica indicada. IOMAP_GPIO_NONE (sin pin asignado) -> false. Usada por
+    // el motor de reglas (rules.h) para construir ruleInputs[] cada loop.
+    bool readSignal(LogicalInput sig) const;
 
     // ── Config management ────────────────────────────────────────────────────
     // setConfig(): validates, compares updated_at, applies, persists to NVS.
