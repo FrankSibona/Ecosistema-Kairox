@@ -1,0 +1,45 @@
+{
+  "io_map": {
+    "inputs": {
+      "permeate_tank_demand":   {"gpio": 5,  "mode": "pullup", "invert": 0},
+      "final_tank_demand":      {"gpio": 15, "mode": "pullup", "invert": 0},
+      "phase_failure":          {"gpio": 21, "mode": "pullup", "invert": 0},
+      "permeate_tank_low":      {"gpio": 22, "mode": "pullup", "invert": 0},
+      "softener_regenerating":  {"gpio": 23, "mode": "pullup", "invert": 0},
+      "pressure_ok":            {"gpio": 33, "mode": "pulldown", "invert": 0}
+    },
+    "outputs": {
+      "transfer_pump": {"gpio": 12, "invert": 0}
+    }
+  },
+  "features": {
+    "feature_well_pump": true,
+    "feature_transfer_pump": true,
+    "feature_softener_interlock": true
+  },
+  "rules": {
+    "process_permits": {
+      "ro": {"op": "AND", "terms": [
+        {"signal": "permeate_tank_demand",  "source": "input", "negate": false},
+        {"signal": "softener_regenerating", "source": "input", "negate": true}
+      ]}
+    },
+    "independent_outputs": {
+      "well_pump": {"op": "OR", "terms": [
+        {"signal": "ro_producing",          "source": "derived", "negate": false},
+        {"signal": "softener_regenerating", "source": "input",   "negate": false}
+      ]},
+      "transfer_pump": {"op": "AND", "terms": [
+        {"signal": "final_tank_demand", "source": "input", "negate": false},
+        {"signal": "permeate_tank_low", "source": "input", "negate": false}
+      ]}
+    },
+    "fault_rules": [
+      {
+        "condition": {"op": "AND", "terms": [{"signal": "phase_failure", "source": "input", "negate": false}]},
+        "reason": "PHASE_FAILURE",
+        "delay_sec": 1
+      }
+    ]
+  }
+}
