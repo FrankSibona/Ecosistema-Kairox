@@ -4864,10 +4864,19 @@ async function saveConfig(){
 
 let IOMAP_CATALOG = null;
 
+// Etiquetas de hardware (wiring fijo D1-D6/R1-R6/Q1-Q2/AIN0-AIN1/TDS1-TDS2,
+// ver firmware/Ro4.0-V1/include/config.h) — solo informativo en la UI.
+const GPIO_LABELS = {
+  4:'R1', 16:'R2', 17:'R3', 18:'R4', 19:'R5', 2:'R6',
+  27:'D1', 26:'D2', 25:'D3', 33:'D4', 32:'D5', 23:'D6',
+  14:'Q1', 13:'Q2', 36:'AIN0', 39:'AIN1', 34:'TDS1', 35:'TDS2',
+};
+
 function gpioOptionsHtml(selected){
   let html = '<option value=""'+(selected==null?' selected':'')+'>— sin asignar —</option>';
   for(let g=0; g<=39; g++){
-    html += '<option value="'+g+'"'+(selected===g?' selected':'')+'>GPIO '+g+'</option>';
+    const label = GPIO_LABELS[g] ? ' ('+GPIO_LABELS[g]+')' : '';
+    html += '<option value="'+g+'"'+(selected===g?' selected':'')+'>GPIO '+g+label+'</option>';
   }
   return html;
 }
@@ -4971,10 +4980,10 @@ async function loadRules(){
 
     const cat = c.catalog;
     document.getElementById('rules-catalog').textContent =
-      'processes: '+cat.processes.join(', ')+'\n'+
-      'independent_outputs: '+cat.independent_outputs.join(', ')+'\n'+
-      'inputs: '+cat.inputs.join(', ')+'\n'+
-      'derived_signals: '+cat.derived_signals.join(', ')+'\n'+
+      'processes: '+cat.processes.join(', ')+'\\n'+
+      'independent_outputs: '+cat.independent_outputs.join(', ')+'\\n'+
+      'inputs: '+cat.inputs.join(', ')+'\\n'+
+      'derived_signals: '+cat.derived_signals.join(', ')+'\\n'+
       'fault_reasons: '+cat.fault_reasons.join(', ');
   } catch(e){}
 }
