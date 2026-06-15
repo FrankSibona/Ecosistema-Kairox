@@ -118,6 +118,7 @@ from email.mime.text import MIMEText
 
 import alert_config as acfg
 import io_catalog
+import rule_catalog
 from collections import deque, defaultdict
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional, Dict, List, Any
@@ -3373,6 +3374,143 @@ def _publish_device_iomap(device_id: str, io_map: dict):
     mqtt_client.publish(f"fyntek/{device_id}/iomap", payload, retain=True)
     log.info(f"[{device_id}] IO map MQTT publicado (retained)")
 
+
+# ============================================================
+# RULES — motor de reglas process_permits[]/independent_outputs[]/fault_rules[]
+# (ver rule_catalog.py)
+# ============================================================
+
+@api.route("/api/rules/<device_id>", methods=["GET"])
+def get_rules(device_id):
+    rows = db.fetchall(
+        "SELECT rules FROM devices WHERE device_id=%s",
+        (device_id,)
+    )
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+    stored_rules, = rows[0]
+    return jsonify({
+        "rules": rule_catalog.merge_rules(stored_rules),
+        "catalog": {
+            "processes":           rule_catalog.PROCESSES,
+            "independent_outputs": rule_catalog.INDEPENDENT_OUTPUTS,
+            "inputs":              io_catalog.LOGICAL_INPUTS,
+            "derived_signals":     rule_catalog.DERIVED_SIGNALS,
+            "fault_reasons":       rule_catalog.FAULT_REASONS,
+            "process_labels":      rule_catalog.PROCESS_LABELS,
+            "output_labels":       io_catalog.OUTPUT_LABELS,
+            "input_labels":        io_catalog.INPUT_LABELS,
+            "derived_labels":      rule_catalog.DERIVED_LABELS,
+            "fault_reason_labels": rule_catalog.FAULT_REASON_LABELS,
+        },
+    })
+
+
+@api.route("/api/rules/<device_id>", methods=["POST"])
+def set_rules(device_id):
+    rows = db.fetchall("SELECT 1 FROM devices WHERE device_id=%s", (device_id,))
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    rules = rule_catalog.validate_rules(data.get("rules") or {})
+
+    db.execute(
+        "UPDATE devices SET rules=%s WHERE device_id=%s",
+        (json.dumps(rules), device_id),
+    )
+    _publish_device_rules(device_id, rule_catalog.merge_rules(rules))
+    alert_manager.fire_event(
+        device_id, "RULES_UPDATED",
+        f"Motor de reglas actualizado: {len(rules['process_permits'])} process_permits, "
+        f"{len(rules['independent_outputs'])} independent_outputs, "
+        f"{len(rules['fault_rules'])} fault_rules",
+        cooldown_sec=60,
+    )
+    return jsonify({"status": "ok"})
+
+
+def _publish_device_rules(device_id: str, rules: dict):
+    """Publish retained rules (process_permits/independent_outputs/fault_rules,
+    catálogo completo) to the device via MQTT.
+
+    Retained so the device receives it immediately on reconnect.
+    updated_at es el version field — el firmware aplica solo si es mayor al
+    actual (mismo patrón que _publish_device_iomap). Claves desconocidas para
+    el firmware son ignoradas; slots ausentes en el payload conservan su valor
+    actual en el dispositivo (partial update).
+    """
+    if not mqtt_client:
+        return
+    import json as _json
+    import time as _time
+    payload = _json.dumps({
+        "process_permits":      rules["process_permits"],
+        "independent_outputs":  rules["independent_outputs"],
+        "fault_rules":          rules["fault_rules"],
+        "updated_at":           int(_time.time()),
+    })
+    mqtt_client.publish(f"fyntek/{device_id}/rules", payload, retain=True)
+    log.info(f"[{device_id}] Rules MQTT publicado (retained)")
+
+
+# ============================================================
+# PROFILE — perfil completo de instalación (io_map + features + rules)
+# en una sola operación. Reusa validate_*/merge_*/_publish_device_* — no
+# agrega columnas ni tópicos MQTT nuevos.
+# ============================================================
+
+@api.route("/api/profile/<device_id>", methods=["GET"])
+def get_profile(device_id):
+    """Perfil completo actual (io_map + features + rules), mismo formato
+    aceptado por POST /api/profile/<device_id> — útil para exportar/backup
+    antes de importar un perfil nuevo (ver docs/chamico_lab_config.json)."""
+    rows = db.fetchall(
+        "SELECT io_map, features, rules FROM devices WHERE device_id=%s",
+        (device_id,)
+    )
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+    stored_io_map, stored_features, stored_rules = rows[0]
+    return jsonify({
+        "io_map":   io_catalog.merge_io_map(stored_io_map),
+        "features": io_catalog.merge_features(stored_features),
+        "rules":    rule_catalog.merge_rules(stored_rules),
+    })
+
+
+@api.route("/api/profile/<device_id>", methods=["POST"])
+def import_profile(device_id):
+    """Importa un perfil completo (io_map + features + rules) en una sola
+    operación — evita 2 POST manuales (/api/iomap + /api/rules). Mismo
+    formato que docs/chamico_lab_config.json."""
+    rows = db.fetchall("SELECT 1 FROM devices WHERE device_id=%s", (device_id,))
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    io_map   = io_catalog.validate_io_map(data.get("io_map") or {})
+    features = io_catalog.validate_features(data.get("features") or {})
+    rules    = rule_catalog.validate_rules(data.get("rules") or {})
+
+    db.execute(
+        "UPDATE devices SET io_map=%s, features=%s, rules=%s WHERE device_id=%s",
+        (json.dumps(io_map), json.dumps(features), json.dumps(rules), device_id),
+    )
+    _publish_device_iomap(device_id, io_catalog.merge_io_map(io_map))
+    _publish_device_rules(device_id, rule_catalog.merge_rules(rules))
+    alert_manager.fire_event(
+        device_id, "PROFILE_IMPORTED",
+        f"Perfil de instalación importado: {len(io_map['inputs'])} entradas, "
+        f"{len(io_map['outputs'])} salidas, "
+        f"{len(rules['process_permits'])} process_permits, "
+        f"{len(rules['independent_outputs'])} independent_outputs, "
+        f"{len(rules['fault_rules'])} fault_rules",
+        cooldown_sec=60,
+    )
+    return jsonify({"status": "ok"})
+
+
 @api.route("/api/baseline/<device_id>", methods=["GET"])
 def get_baseline(device_id):
     cols = []
@@ -4362,6 +4500,35 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
 </div>
 
 <div class="card">
+  <div class="card-title">Motor de reglas (avanzado)</div>
+  <p class="hint">process_permits / independent_outputs / fault_rules — editor JSON.
+  Requiere FW ≥ 1.1.6 para sincronizar. Ver catálogo de señales abajo.</p>
+  <pre class="hint" id="rules-catalog" style="white-space:pre-wrap"></pre>
+  <textarea id="rules-json" rows="16" style="width:100%;font-family:monospace;font-size:.78rem;
+    background:#0d1117;color:#c9d1d9;border:1px solid #1a1f2e;border-radius:.4rem;padding:.5rem"></textarea>
+  <button onclick="saveRules()" style="background:#7c3aed;color:#fff;width:100%;padding:.75rem;margin-top:.5rem">
+    Guardar reglas
+  </button>
+</div>
+
+<div class="card">
+  <div class="card-title">Perfil de instalación (io_map + features + rules)</div>
+  <p class="hint">Importa/exporta el perfil completo en una sola operación
+  (1 POST en vez de 2). Mismo formato que docs/chamico_lab_config.json.
+  Requiere FW ≥ 1.1.7.</p>
+  <textarea id="profile-json" rows="16" style="width:100%;font-family:monospace;font-size:.78rem;
+    background:#0d1117;color:#c9d1d9;border:1px solid #1a1f2e;border-radius:.4rem;padding:.5rem"></textarea>
+  <div style="display:flex;gap:.5rem;margin-top:.5rem">
+    <button onclick="exportProfile()" style="background:#30363d;color:#fff;flex:1;padding:.75rem">
+      Exportar actual
+    </button>
+    <button onclick="importProfile()" style="background:#7c3aed;color:#fff;flex:1;padding:.75rem">
+      Importar perfil
+    </button>
+  </div>
+</div>
+
+<div class="card">
   <div class="card-title">Respuesta</div>
   <div class="rbox" id="resp">—</div>
 </div>
@@ -4448,6 +4615,7 @@ function onDevChange(){
   pollAi();
   loadConfig();
   loadIomap();
+  loadRules();
   fetchAlerts();
 }
 
@@ -4793,10 +4961,101 @@ async function saveIomap(){
   }
 }
 
+async function loadRules(){
+  try {
+    const r = await fetch('/api/rules/'+dev());
+    if(!r.ok) return;
+    const c = await r.json();
+
+    document.getElementById('rules-json').value = JSON.stringify(c.rules, null, 2);
+
+    const cat = c.catalog;
+    document.getElementById('rules-catalog').textContent =
+      'processes: '+cat.processes.join(', ')+'\n'+
+      'independent_outputs: '+cat.independent_outputs.join(', ')+'\n'+
+      'inputs: '+cat.inputs.join(', ')+'\n'+
+      'derived_signals: '+cat.derived_signals.join(', ')+'\n'+
+      'fault_reasons: '+cat.fault_reasons.join(', ');
+  } catch(e){}
+}
+
+async function saveRules(){
+  const box = document.getElementById('resp');
+  box.className = 'rbox'; box.textContent = 'Guardando reglas...';
+
+  let rules;
+  try {
+    rules = JSON.parse(document.getElementById('rules-json').value);
+  } catch(e){
+    box.className = 'rbox er'; box.textContent = 'JSON inválido: '+e.message;
+    return;
+  }
+
+  try {
+    const r = await fetch('/api/rules/'+dev(), {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({rules})
+    });
+    const data = await r.json();
+    box.className   = 'rbox '+(r.ok?'ok':'er');
+    box.textContent = JSON.stringify(data, null, 2);
+  } catch(e){
+    box.className   = 'rbox er';
+    box.textContent = 'Error: '+e.message;
+  }
+}
+
+async function exportProfile(){
+  const box = document.getElementById('resp');
+  box.className = 'rbox'; box.textContent = 'Exportando perfil...';
+  try {
+    const r = await fetch('/api/profile/'+dev());
+    const data = await r.json();
+    if(!r.ok){
+      box.className = 'rbox er'; box.textContent = JSON.stringify(data, null, 2);
+      return;
+    }
+    document.getElementById('profile-json').value = JSON.stringify(data, null, 2);
+    box.className = 'rbox ok'; box.textContent = 'Perfil actual cargado abajo.';
+  } catch(e){
+    box.className = 'rbox er'; box.textContent = 'Error: '+e.message;
+  }
+}
+
+async function importProfile(){
+  const box = document.getElementById('resp');
+  box.className = 'rbox'; box.textContent = 'Importando perfil...';
+
+  let profile;
+  try {
+    profile = JSON.parse(document.getElementById('profile-json').value);
+  } catch(e){
+    box.className = 'rbox er'; box.textContent = 'JSON inválido: '+e.message;
+    return;
+  }
+
+  try {
+    const r = await fetch('/api/profile/'+dev(), {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(profile)
+    });
+    const data = await r.json();
+    box.className   = 'rbox '+(r.ok?'ok':'er');
+    box.textContent = JSON.stringify(data, null, 2);
+    if(r.ok){ loadIomap(); loadRules(); }
+  } catch(e){
+    box.className   = 'rbox er';
+    box.textContent = 'Error: '+e.message;
+  }
+}
+
 setInterval(poll, 5000);
 poll();
 loadConfig();
 loadIomap();
+loadRules();
 fetchAlerts();
 
 // ── AI Integration ──────────────────────────────────────────────────────────
@@ -5017,6 +5276,8 @@ def main():
     # Capa de abstracción Pin<->Señal lógica + features por dispositivo (ver io_catalog.py)
     db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS io_map   JSONB DEFAULT '{}'::jsonb")
     db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS features JSONB DEFAULT '{}'::jsonb")
+    # Motor de reglas — process_permits[]/independent_outputs[]/fault_rules[] (ver rule_catalog.py)
+    db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS rules    JSONB DEFAULT '{}'::jsonb")
     log.info("✅ Schema migrations aplicadas")
 
     # Pre-populate tracker from DB so panels show correct state after restart

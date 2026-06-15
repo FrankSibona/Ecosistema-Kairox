@@ -25,6 +25,15 @@ LOGICAL_INPUTS = [
     "softener_regenerating",
     "well_low_level",
     "dosing_ok",
+    "permeate_tank_demand",
+    "final_tank_demand",
+    "phase_failure",
+]
+
+# Orden informativo (coincide con DerivedSignal en io_catalog.h). No vienen
+# de io_map/GPIO — se calculan cada loop desde el estado de un proceso.
+DERIVED_SIGNALS = [
+    "ro_producing",
 ]
 
 # Orden informativo (coincide con LogicalOutput en io_catalog.h).
@@ -52,6 +61,14 @@ INPUT_LABELS = {
     "softener_regenerating": "Ablandador regenerando",
     "well_low_level":        "Pozo: nivel bajo",
     "dosing_ok":             "Dosificación OK",
+    "permeate_tank_demand":  "Tanque permeado: demanda (arranque RO)",
+    "final_tank_demand":     "Tanque final: demanda (bomba transferencia)",
+    "phase_failure":         "Falla de fase (protección RO)",
+}
+
+# Etiquetas para señales derivadas (no vienen de io_map/GPIO).
+DERIVED_LABELS = {
+    "ro_producing": "RO produciendo",
 }
 
 OUTPUT_LABELS = {
@@ -82,6 +99,9 @@ DEFAULT_IO_MAP = {
         "softener_regenerating": {"gpio": None, "mode": "pullup",   "invert": 0},
         "well_low_level":        {"gpio": 32,   "mode": "pullup",   "invert": 0},
         "dosing_ok":             {"gpio": 25,   "mode": "pullup",   "invert": 0},
+        "permeate_tank_demand":  {"gpio": None, "mode": "pullup",   "invert": 0},
+        "final_tank_demand":     {"gpio": None, "mode": "pullup",   "invert": 0},
+        "phase_failure":         {"gpio": None, "mode": "pullup",   "invert": 0},
     },
     "outputs": {
         "low_pressure_pump":  {"gpio": 4,    "invert": 0},
