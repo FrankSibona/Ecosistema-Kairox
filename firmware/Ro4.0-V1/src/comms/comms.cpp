@@ -314,7 +314,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "1.1.7";
+const char* fw_version = "1.1.8";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -331,6 +331,11 @@ PubSubClient mqttClient(espClient);
 
 unsigned long lastWifiCheck = 0;
 unsigned long lastMqttReconnect = 0;
+
+// ── WiFi fallback portal (ver setupWiFi() / WIFI_FALLBACK_* en config.h) ────
+unsigned long wifiDownSince = 0;  // 0 = conectado o portal de fallback activo
+bool fallbackPortalActive   = false;
+unsigned long lastPortalHeapLog = 0;  // último log periódico de heap con portal abierto
 
 // true una vez que configTime() fue llamado tras la primera conexión WiFi.
 // Permite disparar la sincronización NTP también cuando la conexión se
@@ -350,6 +355,19 @@ String getDeviceID() {
         (uint32_t)mac);
 
     return String(id);
+}
+
+// SSID/password del portal de fallback, derivados de device_id — documentables
+// y recuperables sin consultar al equipo (ej. ESP32_ECBA88C92DF4 -> SSID
+// "FYNTEK_2DF4", password "kairox88c92df4").
+String fallbackPortalSSID() {
+    return "FYNTEK_" + device_id.substring(device_id.length() - 4);
+}
+
+String fallbackPortalPassword() {
+    String pass = "kairox" + device_id.substring(device_id.length() - 8);
+    pass.toLowerCase();
+    return pass;
 }
 
 // ================= HELPERS =================
@@ -546,10 +564,56 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
             Serial.println("[COMMS] WiFi reconectando...");
             WiFi.reconnect();
             ntpConfigured = false;
-        } else if (!ntpConfigured) {
-            configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-            ntpConfigured = true;
-            Serial.println("✅ WiFi conectado — NTP sincronizado");
+
+            if (wifiDownSince == 0) wifiDownSince = now;
+
+            // Fallback de reconfiguración: sin conexión por WIFI_FALLBACK_DELAY_SEC
+            // (debounce, evita abrir/cerrar ante micro-cortes) -> abrir portal
+            // AP+STA y dejarlo abierto sin timeout (credenciales guardadas
+            // siguen reintentando en background, ver bloque de abajo).
+            if (!fallbackPortalActive
+                && now - wifiDownSince >= (WIFI_FALLBACK_DELAY_SEC * 1000UL)) {
+                Serial.printf("[WIFI] Sin conexion >%us — portal fallback '%s' (heap libre: %u)\n",
+                    WIFI_FALLBACK_DELAY_SEC, fallbackPortalSSID().c_str(), ESP.getFreeHeap());
+                wm.setConfigPortalBlocking(false);
+                wm.startConfigPortal(fallbackPortalSSID().c_str(), fallbackPortalPassword().c_str());
+                fallbackPortalActive = true;
+                lastPortalHeapLog = now;
+            }
+        } else {
+            wifiDownSince = 0;
+            if (!ntpConfigured) {
+                configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+                ntpConfigured = true;
+                Serial.println("✅ WiFi conectado — NTP sincronizado");
+            }
+        }
+    }
+
+    // ===== WIFI FALLBACK PORTAL =====
+    // wm.process() se llama cada loop (no solo cada 10s) para que el
+    // webserver/DNS del portal cautivo respondan con latencia aceptable.
+    // Sin timeout propio: queda abierto mientras dure la desconexión y se
+    // cierra apenas WiFi.status() vuelve a WL_CONNECTED (red original via
+    // STA en background, o credenciales nuevas cargadas desde el portal).
+    if (fallbackPortalActive) {
+        wm.process();
+
+        // Log periódico de heap libre — visibilidad para validar estabilidad
+        // en cortes prolongados (ver WIFI_PORTAL_HEAP_LOG_SEC en config.h).
+        if (now - lastPortalHeapLog >= (WIFI_PORTAL_HEAP_LOG_SEC * 1000UL)) {
+            lastPortalHeapLog = now;
+            Serial.printf("[WIFI] Portal fallback activo — heap libre: %u\n", ESP.getFreeHeap());
+        }
+
+        if (WiFi.status() == WL_CONNECTED) {
+            wm.stopConfigPortal();
+            WiFi.mode(WIFI_STA);
+            fallbackPortalActive = false;
+            wifiDownSince = 0;
+            ntpConfigured = false;  // forzar re-sync NTP en el próximo ciclo
+            Serial.printf("[WIFI] Portal fallback cerrado — reconectado (heap libre: %u)\n",
+                ESP.getFreeHeap());
         }
     }
 

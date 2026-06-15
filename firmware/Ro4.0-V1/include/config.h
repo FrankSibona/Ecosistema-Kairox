@@ -143,6 +143,19 @@
 // configura WiFi en este tiempo, el equipo arranca offline igual.
 #define WIFI_PORTAL_TIMEOUT_SEC 180U
 
+// ── Fallback de reconfiguración WiFi en campo (sin botón/reflash) ───────────
+// Si el equipo YA tiene credenciales guardadas pero no logra conectar durante
+// WIFI_FALLBACK_DELAY_SEC (debounce — evita abrir/cerrar el portal ante
+// micro-cortes normales de WiFi), abre el portal WiFiManager en modo AP+STA
+// (SSID/password derivados del device_id, ver comms.cpp) y lo deja abierto
+// SIN timeout mientras dure la desconexión. La STA sigue reintentando las
+// credenciales guardadas en background — apenas reconecta (red original o
+// credenciales nuevas vía portal), el portal se cierra automáticamente.
+// No afecta el portal de primer arranque (rama sin credenciales guardadas en
+// setupWiFi()), que sigue siendo bloqueante/único.
+#define WIFI_FALLBACK_DELAY_SEC  20U     // seg. sin conexión -> abrir portal (debounce)
+#define WIFI_PORTAL_HEAP_LOG_SEC 1800U   // log periódico de heap libre con portal abierto
+
 // ================= WATCHDOG =================
 // Task watchdog del ESP32 — red de seguridad ante cuelgues reales (deadlock,
 // bucle infinito, bloqueo de librería). 30s es deliberadamente holgado para
