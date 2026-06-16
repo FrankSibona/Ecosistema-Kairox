@@ -65,7 +65,7 @@ el término `softener_regenerating` (OR).
 | Paso | Acción | Esperado |
 |---|---|---|
 | 1 | Con RO en PRODUCING (caso 1 completo) | `state=PRODUCING`, well_pump según `ro_producing` (ON) |
-| 2 | Cerrar contacto en GPIO23 (`softener_regenerating=1`) | `permitOk=false` → Serial `[FAULT] Pérdida condición`; `state=IDLE`; R1/R2 OFF |
+| 2 | Cerrar contacto en GPIO25 (`softener_regenerating=1`) | `permitOk=false` → Serial `[FAULT] Pérdida condición`; `state=IDLE`; R1/R2 OFF |
 | 3 | Verificar well_pump | Sigue **ON** — `independent_outputs["well_pump"] = ro_producing OR softener_regenerating`; aunque `ro_producing` ya es `false`, `softener_regenerating=1` lo mantiene ON |
 | 4 | `/outputs` MQTT (`pump_inlet`) | `true` |
 | 5 | `demand=1` (GPIO27) sostenido durante este paso | RO permanece en IDLE — `permitOk=false` bloquea el arranque mientras `softener_regenerating=1` |
@@ -84,8 +84,8 @@ desde IDLE — sin intervención manual ni comando.
 
 | Paso | Acción | Esperado |
 |---|---|---|
-| 1 | Continuar desde caso 2 (`state=IDLE`, `softener_regenerating=1`, `permeate_tank_demand=1`) | — |
-| 2 | Abrir contacto GPIO23 (`softener_regenerating=0`) | `permitOk` vuelve a `true` (AND ya no es bloqueado por NOT) |
+| 1 | Continuar desde caso 2 (`state=IDLE`, `softener_regenerating=1`, `demand=1`) | — |
+| 2 | Abrir contacto GPIO25 (`softener_regenerating=0`) | `permitOk` vuelve a `true` (AND ya no es bloqueado por NOT) |
 | 3 | Observar siguiente ciclo de `loop()` | `state: IDLE -> STARTING` automático (sin comando externo), igual que caso 1 paso 2 |
 | 4 | well_pump | Pasa a depender solo de `ro_producing` — OFF hasta que `state=PRODUCING` de nuevo |
 | 5 | Verificar `retryCount` | Debe estar en 0 si la transición previa a IDLE fue por `permitOk=false` (no por falla de presión) — confirmar que no quedó un retry pendiente bloqueando el rearranque |
@@ -104,10 +104,10 @@ permeate_tank_low` se evalúa cada loop, independiente del estado de RO
 
 | Paso | Acción | Esperado |
 |---|---|---|
-| 1 | `final_tank_demand=0` (GPIO15), `permeate_tank_low=0` (GPIO22) | transfer_pump (GPIO12) OFF |
-| 2 | Cerrar solo GPIO15 (`final_tank_demand=1`) | transfer_pump sigue OFF (AND no satisfecho) |
-| 3 | Cerrar también GPIO22 (`permeate_tank_low=1`), ambos =1 | transfer_pump ON (GPIO12 en alto) |
-| 4 | Abrir GPIO22 (`permeate_tank_low=0`) | transfer_pump OFF inmediatamente |
+| 1 | `final_tank_demand=0` (GPIO32), `permeate_tank_low=0` (GPIO33) | transfer_pump (GPIO12) OFF |
+| 2 | Cerrar solo GPIO32 (`final_tank_demand=1`) | transfer_pump sigue OFF (AND no satisfecho) |
+| 3 | Cerrar también GPIO33 (`permeate_tank_low=1`), ambos =1 | transfer_pump ON (GPIO12 en alto) |
+| 4 | Abrir GPIO33 (`permeate_tank_low=0`) | transfer_pump OFF inmediatamente |
 | 5 | Repetir con RO en PRODUCING (caso 1) | transfer_pump responde igual — regla independiente de `state` de RO |
 
 Verificación: multímetro/LED en GPIO12 (no hay publicación MQTT de
@@ -124,8 +124,8 @@ Objetivo: `fault_rules[0]` (`phase_failure` sostenido ≥ `delay_sec=1s`) →
 | Paso | Acción | Esperado |
 |---|---|---|
 | 1 | Con RO en PRODUCING (caso 1) | `state=PRODUCING` |
-| 2 | Cerrar contacto GPIO21 (`phase_failure=1`) por < 1s y volver a abrir | Sin efecto — `faultRuleArmed[0]` se resetea antes del debounce |
-| 3 | Cerrar contacto GPIO21 y sostener > 1s | Serial: `[FAULT] fault_rules[0] -> PHASE_FAILURE`; `state=FAULT` |
+| 2 | Abrir contacto GPIO23 (`phase_failure` lógico=1, invert=1) por < 1s y volver a cerrar | Sin efecto — `faultRuleArmed[0]` se resetea antes del debounce |
+| 3 | Abrir contacto GPIO23 y sostener > 1s | Serial: `[FAULT] fault_rules[0] -> PHASE_FAILURE`; `state=FAULT` |
 | 4 | `/state` MQTT | `state="FAULT"`, `fault_reason="PHASE_FAILURE"` |
 | 5 | R1/R2 | OFF (`stopAll()` en FAULT) |
 | 5b | well_pump / transfer_pump | `independent_outputs[]` se evalúa cada loop **independientemente del `state`** (incluso en FAULT) — well_pump pasa a OFF porque `ro_producing=false` en FAULT y (en este escenario) `softener_regenerating=0`; transfer_pump sigue respondiendo a `final_tank_demand AND permeate_tank_low` sin relación con el FAULT de RO |

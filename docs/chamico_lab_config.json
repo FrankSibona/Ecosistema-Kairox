@@ -1,13 +1,21 @@
 {
   "io_map": {
     "inputs": {
-      "demand":                {"gpio": 27, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
-      "pressure_ok":           {"gpio": 26, "mode": "pullup",   "invert": 0, "default_value": 1, "debounce_ms": 2000},
-      "raw_water_available":   {"gpio": null, "mode": "pullup", "invert": 0, "default_value": 1, "debounce_ms": 0},
-      "softener_regenerating": {"gpio": 25, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
-      "permeate_tank_low":     {"gpio": 33, "mode": "pulldown", "invert": 0, "default_value": 0, "debounce_ms": 0},
-      "final_tank_demand":     {"gpio": 32, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
-      "phase_failure":         {"gpio": 23, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0}
+      "demand":                {"gpio": 27,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "pressure_ok":           {"gpio": 26,   "mode": "pullup",   "invert": 0, "default_value": 1, "debounce_ms": 2000},
+      "raw_water_available":   {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 1, "debounce_ms": 0},
+      "softener_regenerating": {"gpio": 25,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "permeate_tank_low":     {"gpio": 33,   "mode": "pulldown", "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "final_tank_demand":     {"gpio": 32,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "phase_failure":         {"gpio": 23,   "mode": "pullup",   "invert": 1, "default_value": 0, "debounce_ms": 0},
+      "dosing_ok":             {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "feed_tank_high":        {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "feed_tank_low":         {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "final_tank_high":       {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "final_tank_low":        {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "permeate_tank_demand":  {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "permeate_tank_high":    {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "well_low_level":        {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0}
     },
     "outputs": {
       "transfer_pump": {"gpio": 12, "invert": 0}
