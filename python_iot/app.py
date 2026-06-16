@@ -1759,6 +1759,19 @@ class AlertManager:
             log.info(f"[ALERT] RESOLVED — {device_id} {c}")
         self._active_codes[device_id] = codes - removed
 
+    def resolve_all_active(self, device_id: str):
+        """Resolve ALL active alerts for a device (incluido DEVICE_OFFLINE).
+        Llamado en RST: el operador reconoce el estado y el equipo está online."""
+        db.execute(
+            "UPDATE alerts SET active=FALSE, resolved_at=NOW(), updated_at=NOW() "
+            "WHERE device_id=%s AND active=TRUE",
+            (device_id,)
+        )
+        codes = set(self._active_codes.get(device_id, set()))
+        for c in codes:
+            log.info(f"[ALERT] RESOLVED — {device_id} {c}")
+        self._active_codes[device_id] = set()
+
     def fire_event(self, device_id: str, code: str, message: str, cooldown_sec: int = 300):
         """
         Persist a one-shot INFO event and notify once.
@@ -3828,6 +3841,16 @@ def ack_alert(alert_id):
     return jsonify({"id": alert_id, "acked": True})
 
 
+@api.route("/api/alerts/resolve/<device_id>", methods=["POST"])
+def resolve_all_alerts(device_id):
+    """Resuelve todas las alertas activas de un dispositivo (equivalente al
+    botón 'Limpiar alarmas' en la UI — sin enviar comando al equipo)."""
+    if not db.fetchall("SELECT 1 FROM devices WHERE device_id=%s", (device_id,)):
+        return jsonify({"error": "device_not_found"}), 404
+    alert_manager.resolve_all_active(device_id)
+    return jsonify({"status": "ok", "device_id": device_id})
+
+
 @api.route("/api/business/<device_id>", methods=["GET"])
 def get_business_history(device_id):
     """Historial de métricas de negocio (últimos 30 días)."""
@@ -3883,6 +3906,12 @@ def post_command(device_id):
         if result["error"] == "unknown_command":
             return jsonify(result), 400
         return jsonify(result), 500
+
+    # RST emitido con éxito → limpiar todas las alertas activas del dispositivo.
+    # El operador reconoce el fault; si la condición persiste se re-disparará
+    # en el siguiente ciclo de telemetría.
+    if cmd == "RST":
+        alert_manager.resolve_all_active(device_id)
 
     return jsonify(result), 201
 
@@ -4391,6 +4420,10 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
 <div class="card">
   <div class="card-title">Alertas activas</div>
   <div id="alerts-list"><span class="meta">Cargando...</span></div>
+  <button onclick="resolveAllAlerts()" style="margin-top:.6rem;background:#1e293b;color:#94a3b8;
+    border:1px solid #334155;width:100%;padding:.5rem;border-radius:.4rem;cursor:pointer;font-size:.75rem">
+    Limpiar alarmas
+  </button>
 </div>
 
 <div class="card">
@@ -4742,6 +4775,11 @@ async function ackAlert(id){
     await fetch('/api/alerts/ack/'+id, {method:'POST'});
     fetchAlerts();
   } catch(e){}
+}
+
+async function resolveAllAlerts(){
+  await fetch('/api/alerts/resolve/'+dev(), {method:'POST'});
+  fetchAlerts();
 }
 
 async function fetchAlerts(){
