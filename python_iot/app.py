@@ -4558,6 +4558,38 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
 </div>
 
 <div class="card">
+  <div class="card-title">Tiempos de proceso FSM</div>
+  <p class="hint">Parámetros de temporización del ciclo de OI. Se aplican en runtime sin reiniciar
+  el equipo — requiere FW ≥ 1.2.0. Los defaults reproducen el comportamiento anterior.</p>
+  <div class="cfg-section">Arranque</div>
+  <div class="cfg-field">
+    <label>Espera baja→alta presión [s]</label>
+    <input type="number" id="pc-stab" step="1" min="0" max="300" placeholder="10">
+  </div>
+  <div class="cfg-field">
+    <label>Timeout verificación presostato [s]</label>
+    <input type="number" id="pc-tout" step="1" min="1" max="300" placeholder="5">
+  </div>
+  <div class="cfg-section">Reintentos</div>
+  <div class="cfg-field">
+    <label>Espera entre reintentos [s]</label>
+    <input type="number" id="pc-retry" step="1" min="0" max="600" placeholder="10">
+  </div>
+  <div class="cfg-field">
+    <label>Reintentos máx. antes de FAULT</label>
+    <input type="number" id="pc-maxr" step="1" min="1" max="20" placeholder="5">
+  </div>
+  <div class="cfg-section">Flush</div>
+  <div class="cfg-field">
+    <label>Duración ciclo de flush [s]</label>
+    <input type="number" id="pc-flush" step="1" min="1" max="600" placeholder="60">
+  </div>
+  <button onclick="saveProcessConfig()" style="background:#7c3aed;color:#fff;width:100%;padding:.75rem">
+    Guardar tiempos de proceso
+  </button>
+</div>
+
+<div class="card">
   <div class="card-title">Mapeo de E/S (avanzado)</div>
   <p class="hint">Asigna pines físicos a señales lógicas y habilita features del equipo.
   No cambia el comportamiento actual del equipo — requiere FW ≥ 1.1.5 para sincronizar.</p>
@@ -5157,9 +5189,49 @@ async function importProfile(){
   }
 }
 
+async function loadProcessConfig(){
+  try {
+    const r = await fetch('/api/process_config/'+dev());
+    if(!r.ok) return;
+    const c = await r.json();
+    const p = c.process_config;
+    document.getElementById('pc-stab').value  = p.pressure_stabilization_delay_sec;
+    document.getElementById('pc-tout').value  = p.startup_timeout_sec;
+    document.getElementById('pc-retry').value = p.retry_interval_sec;
+    document.getElementById('pc-maxr').value  = p.max_retries;
+    document.getElementById('pc-flush').value = p.flush_duration_sec;
+  } catch(e){}
+}
+
+async function saveProcessConfig(){
+  const box = document.getElementById('resp');
+  box.className = 'rbox'; box.textContent = 'Guardando tiempos de proceso...';
+  const payload = {
+    pressure_stabilization_delay_sec: parseInt(document.getElementById('pc-stab').value)  || 10,
+    startup_timeout_sec:              parseInt(document.getElementById('pc-tout').value)  || 5,
+    retry_interval_sec:               parseInt(document.getElementById('pc-retry').value) || 10,
+    max_retries:                      parseInt(document.getElementById('pc-maxr').value)  || 5,
+    flush_duration_sec:               parseInt(document.getElementById('pc-flush').value) || 60,
+  };
+  try {
+    const r = await fetch('/api/process_config/'+dev(), {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await r.json();
+    box.className   = 'rbox '+(r.ok?'ok':'er');
+    box.textContent = JSON.stringify(data, null, 2);
+    if(r.ok) loadProcessConfig();
+  } catch(e){
+    box.className = 'rbox er'; box.textContent = 'Error: '+e.message;
+  }
+}
+
 setInterval(poll, 5000);
 poll();
 loadConfig();
+loadProcessConfig();
 loadIomap();
 loadRules();
 fetchAlerts();
