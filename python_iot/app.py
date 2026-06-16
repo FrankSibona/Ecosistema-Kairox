@@ -2174,18 +2174,29 @@ class MessageProcessor:
 
     def _handle_state(self, device_id, timestamp, data):
         state = data.get("state", "UNKNOWN")
+        fault_reason = data.get("fault_reason") or None
         db.execute(
-            "INSERT INTO telemetry_state (time,device_id,state,state_numeric,running,retry_count) "
-            "VALUES (%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO telemetry_state (time,device_id,state,state_numeric,running,retry_count,fault_reason) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
             (timestamp, device_id, state, STATE_MAP.get(state, -1),
-             validate_bool(data.get("running")), data.get("retry", 0)),
+             validate_bool(data.get("running")), data.get("retry", 0), fault_reason),
+        )
+        # Sync fault_reason to device_status so Grafana can query it directly.
+        # Clear it when state leaves FAULT (fault_reason="" or state != FAULT).
+        effective_reason = fault_reason if state == "FAULT" else None
+        db.execute(
+            "INSERT INTO device_status (device_id, last_seen, online, state, fault_reason) "
+            "VALUES (%s, %s, TRUE, %s, %s) "
+            "ON CONFLICT (device_id) DO UPDATE "
+            "SET state = EXCLUDED.state, fault_reason = EXCLUDED.fault_reason",
+            (device_id, timestamp, state, effective_reason),
         )
         tracker.update_state(
             device_id, state,
             retry_count=data.get("retry", 0),
-            fault_reason=data.get("fault_reason") or None,
+            fault_reason=fault_reason,
         )
-        log.info(f"[{device_id}] Estado → {state}")
+        log.info(f"[{device_id}] Estado → {state}" + (f" ({fault_reason})" if fault_reason else ""))
         if state == "FAULT":
             self._run_analytics(device_id, timestamp, tracker.get_process(device_id) or {})
 

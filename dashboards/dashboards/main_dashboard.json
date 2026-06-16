@@ -129,7 +129,7 @@
           }
         }
       ],
-      "title": "📶 Conectividad",
+      "title": "\ud83d\udcf6 Conectividad",
       "type": "stat"
     },
     {
@@ -148,32 +148,32 @@
                 "FAULT": {
                   "color": "red",
                   "index": 4,
-                  "text": "🔴 Falla"
+                  "text": "\ud83d\udd34 Falla"
                 },
                 "IDLE": {
                   "color": "super-light-blue",
                   "index": 2,
-                  "text": "⏸️ En espera"
+                  "text": "\u23f8\ufe0f En espera"
                 },
                 "PRODUCING": {
                   "color": "green",
                   "index": 0,
-                  "text": "⚙️ Produciendo"
+                  "text": "\u2699\ufe0f Produciendo"
                 },
                 "STARTING": {
                   "color": "light-blue",
                   "index": 1,
-                  "text": "🔄 Arrancando"
+                  "text": "\ud83d\udd04 Arrancando"
                 },
                 "STOPPING": {
                   "color": "light-blue",
                   "index": 3,
-                  "text": "⏹️ Deteniendo"
+                  "text": "\u23f9\ufe0f Deteniendo"
                 },
                 "UNKNOWN": {
                   "color": "super-light-blue",
                   "index": 5,
-                  "text": "⚪ Sin datos"
+                  "text": "\u26aa Sin datos"
                 }
               },
               "type": "value"
@@ -247,7 +247,7 @@
           }
         }
       ],
-      "title": "🟢 Estado del equipo",
+      "title": "\ud83d\udfe2 Estado del equipo",
       "type": "stat"
     },
     {
@@ -305,7 +305,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT \"Diagnóstico\" FROM (\n  SELECT 1 AS ord,\n    CASE\n      WHEN ds.state = 'FAULT'\n        THEN COALESCE(dcf.diagnostic_text, ds.last_diag_message)\n      ELSE COALESCE(dch.diagnostic_text, ds.health_message, ds.state)\n    END AS \"Diagnóstico\"\n  FROM device_status ds\n  LEFT JOIN diagnostic_catalog dcf ON dcf.code = ds.last_diag_code\n  LEFT JOIN diagnostic_catalog dch ON dch.code = ds.health_code\n  WHERE ds.device_id = '$device'\n\n  UNION ALL\n\n  SELECT 2 AS ord, dc.diagnostic_text AS \"Diagnóstico\"\n  FROM device_status ds\n  CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ds.secondary_diag_codes, '[]'::jsonb)) sc\n  JOIN diagnostic_catalog dc ON dc.code = sc\n  WHERE ds.device_id = '$device' AND ds.state != 'FAULT'\n) x\nORDER BY ord;",
+          "rawSql": "SELECT \"Diagn\u00f3stico\" FROM (\n  SELECT 1 AS ord,\n    CASE\n      WHEN ds.state = 'FAULT'\n        THEN COALESCE(dcf.diagnostic_text, ds.last_diag_message)\n      ELSE COALESCE(dch.diagnostic_text, ds.health_message, ds.state)\n    END AS \"Diagn\u00f3stico\"\n  FROM device_status ds\n  LEFT JOIN diagnostic_catalog dcf ON dcf.code = ds.last_diag_code\n  LEFT JOIN diagnostic_catalog dch ON dch.code = ds.health_code\n  WHERE ds.device_id = '$device'\n\n  UNION ALL\n\n  SELECT 2 AS ord, dc.diagnostic_text AS \"Diagn\u00f3stico\"\n  FROM device_status ds\n  CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ds.secondary_diag_codes, '[]'::jsonb)) sc\n  JOIN diagnostic_catalog dc ON dc.code = sc\n  WHERE ds.device_id = '$device' AND ds.state != 'FAULT'\n) x\nORDER BY ord;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -326,7 +326,7 @@
           }
         }
       ],
-      "title": "🧠 Diagnóstico",
+      "title": "\ud83e\udde0 Diagn\u00f3stico",
       "type": "table"
     },
     {
@@ -345,7 +345,7 @@
                 "CRITICAL": {
                   "color": "red",
                   "index": 3,
-                  "text": "CRÍTICO"
+                  "text": "CR\u00cdTICO"
                 },
                 "HIGH": {
                   "color": "orange",
@@ -434,7 +434,7 @@
           }
         }
       ],
-      "title": "⚠️ Riesgo",
+      "title": "\u26a0\ufe0f Riesgo",
       "type": "stat"
     },
     {
@@ -522,7 +522,7 @@
           }
         }
       ],
-      "title": "⏱️ Minutos sin señal",
+      "title": "\u23f1\ufe0f Minutos sin se\u00f1al",
       "type": "stat"
     },
     {
@@ -541,7 +541,7 @@
                 "CRITICAL": {
                   "color": "red",
                   "index": 2,
-                  "text": "CRÍTICO"
+                  "text": "CR\u00cdTICO"
                 },
                 "HEALTHY": {
                   "color": "green",
@@ -630,7 +630,7 @@
           }
         }
       ],
-      "title": "❤️ Salud",
+      "title": "\u2764\ufe0f Salud",
       "type": "stat"
     },
     {
@@ -688,7 +688,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT \"Acción recomendada\" FROM (\n  SELECT DISTINCT ON (\"Acción recomendada\") \"Acción recomendada\", ord\n  FROM (\n    SELECT\n      CASE\n        WHEN ds.state = 'FAULT'\n          THEN COALESCE(dcf.action_text, ds.last_action)\n        ELSE COALESCE(dch.action_text, ds.health_action, ds.last_action, 'Sin acción requerida')\n      END AS \"Acción recomendada\",\n      1 AS ord\n    FROM device_status ds\n    LEFT JOIN diagnostic_catalog dcf ON dcf.code = ds.last_diag_code\n    LEFT JOIN diagnostic_catalog dch ON dch.code = ds.health_code\n    WHERE ds.device_id = '$device'\n\n    UNION ALL\n\n    SELECT dc.action_text, 2 AS ord\n    FROM device_status ds\n    CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ds.secondary_diag_codes, '[]'::jsonb)) sc\n    JOIN diagnostic_catalog dc ON dc.code = sc\n    WHERE ds.device_id = '$device' AND ds.state != 'FAULT'\n  ) x\n  ORDER BY \"Acción recomendada\", ord\n) y\nORDER BY ord\nLIMIT 2;",
+          "rawSql": "SELECT \"Acci\u00f3n recomendada\" FROM (\n  SELECT DISTINCT ON (\"Acci\u00f3n recomendada\") \"Acci\u00f3n recomendada\", ord\n  FROM (\n    SELECT\n      CASE\n        WHEN ds.state = 'FAULT'\n          THEN COALESCE(dcf.action_text, ds.last_action)\n        ELSE COALESCE(dch.action_text, ds.health_action, ds.last_action, 'Sin acci\u00f3n requerida')\n      END AS \"Acci\u00f3n recomendada\",\n      1 AS ord\n    FROM device_status ds\n    LEFT JOIN diagnostic_catalog dcf ON dcf.code = ds.last_diag_code\n    LEFT JOIN diagnostic_catalog dch ON dch.code = ds.health_code\n    WHERE ds.device_id = '$device'\n\n    UNION ALL\n\n    SELECT dc.action_text, 2 AS ord\n    FROM device_status ds\n    CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(ds.secondary_diag_codes, '[]'::jsonb)) sc\n    JOIN diagnostic_catalog dc ON dc.code = sc\n    WHERE ds.device_id = '$device' AND ds.state != 'FAULT'\n  ) x\n  ORDER BY \"Acci\u00f3n recomendada\", ord\n) y\nORDER BY ord\nLIMIT 2;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -709,7 +709,7 @@
           }
         }
       ],
-      "title": "💡 Accion recomendada",
+      "title": "\ud83d\udca1 Accion recomendada",
       "type": "table"
     },
     {
@@ -805,7 +805,7 @@
           }
         }
       ],
-      "title": "🧪 Calidad de Agua",
+      "title": "\ud83e\uddea Calidad de Agua",
       "type": "stat"
     },
     {
@@ -888,7 +888,7 @@
           }
         }
       ],
-      "title": "💧 Caudal ",
+      "title": "\ud83d\udca7 Caudal ",
       "type": "stat"
     },
     {
@@ -975,14 +975,14 @@
           }
         }
       ],
-      "title": "🔵 Producción diaria",
+      "title": "\ud83d\udd35 Producci\u00f3n diaria",
       "type": "stat"
     },
     {
       "datasource": {
         "uid": "dfdcy982omdxce"
       },
-      "description": "Porcentaje de agua de entrada que se convierte en agua purificada.\nValores bajos indican desperdicio; valores altos pueden generar incrustaciones en la membrana.\nRango óptimo típico: 50–75%.",
+      "description": "Porcentaje de agua de entrada que se convierte en agua purificada.\nValores bajos indican desperdicio; valores altos pueden generar incrustaciones en la membrana.\nRango \u00f3ptimo t\u00edpico: 50\u201375%.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1057,7 +1057,7 @@
           }
         }
       ],
-      "title": "⚙️ Recuperación",
+      "title": "\u2699\ufe0f Recuperaci\u00f3n",
       "type": "stat"
     },
     {
@@ -1143,7 +1143,7 @@
           }
         }
       ],
-      "title": "⚡ Eficiencia",
+      "title": "\u26a1 Eficiencia",
       "type": "stat"
     },
     {
@@ -1156,7 +1156,7 @@
       },
       "id": 16,
       "panels": [],
-      "title": "DEGRADACIÓN",
+      "title": "DEGRADACI\u00d3N",
       "type": "row"
     },
     {
@@ -1238,7 +1238,7 @@
           }
         }
       ],
-      "title": "ΔP membrana",
+      "title": "\u0394P membrana",
       "type": "stat"
     },
     {
@@ -1350,7 +1350,7 @@
           }
         }
       ],
-      "title": "📈 ΔP membrana",
+      "title": "\ud83d\udcc8 \u0394P membrana",
       "type": "timeseries"
     },
     {
@@ -1462,7 +1462,7 @@
           }
         }
       ],
-      "title": "📉 Eficiencia en el tiempo",
+      "title": "\ud83d\udcc9 Eficiencia en el tiempo",
       "type": "timeseries"
     },
     {
@@ -1696,7 +1696,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Presión OK"
+              "options": "Presi\u00f3n OK"
             },
             "properties": [
               {
@@ -1707,7 +1707,7 @@
                       "false": {
                         "color": "red",
                         "index": 1,
-                        "text": "Baja presión"
+                        "text": "Baja presi\u00f3n"
                       },
                       "true": {
                         "color": "green",
@@ -1808,7 +1808,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Dosificación"
+              "options": "Dosificaci\u00f3n"
             },
             "properties": [
               {
@@ -1819,7 +1819,7 @@
                       "false": {
                         "color": "red",
                         "index": 1,
-                        "text": "Falta químico"
+                        "text": "Falta qu\u00edmico"
                       },
                       "true": {
                         "color": "green",
@@ -1993,7 +1993,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  COALESCE(pressure_ok, pressure_switch)        AS \"Presión OK\",\n  COALESCE(raw_water_available, raw_water_ok)   AS \"Agua disponible\",\n  demand                                         AS \"Demanda\",\n  COALESCE(well_low_level, feed_tank_level_low) AS \"Nivel pozo\",\n  COALESCE(dosing_ok, dose_ok)                  AS \"Dosificación\",\n  softener_regenerating                          AS \"Ablandador\",\n  permeate_tank_low                              AS \"Tanque permeado\",\n  permeate_tank_demand                           AS \"Demanda permeado\",\n  final_tank_demand                              AS \"Demanda final\",\n  phase_failure                                  AS \"Falla de fase\"\nFROM telemetry_inputs\nWHERE device_id = '$device'\nORDER BY time DESC\nLIMIT 1;",
+          "rawSql": "SELECT\n  COALESCE(pressure_ok, pressure_switch)        AS \"Presi\u00f3n OK\",\n  COALESCE(raw_water_available, raw_water_ok)   AS \"Agua disponible\",\n  demand                                         AS \"Demanda\",\n  COALESCE(well_low_level, feed_tank_level_low) AS \"Nivel pozo\",\n  COALESCE(dosing_ok, dose_ok)                  AS \"Dosificaci\u00f3n\",\n  softener_regenerating                          AS \"Ablandador\",\n  permeate_tank_low                              AS \"Tanque permeado\",\n  permeate_tank_demand                           AS \"Demanda permeado\",\n  final_tank_demand                              AS \"Demanda final\",\n  phase_failure                                  AS \"Falla de fase\"\nFROM telemetry_inputs\nWHERE device_id = '$device'\nORDER BY time DESC\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2073,7 +2073,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Bomba baja presión"
+              "options": "Bomba baja presi\u00f3n"
             },
             "properties": [
               {
@@ -2101,7 +2101,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Bomba alta presión"
+              "options": "Bomba alta presi\u00f3n"
             },
             "properties": [
               {
@@ -2185,7 +2185,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Válvula flush"
+              "options": "V\u00e1lvula flush"
             },
             "properties": [
               {
@@ -2213,7 +2213,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Válvula entrada"
+              "options": "V\u00e1lvula entrada"
             },
             "properties": [
               {
@@ -2286,7 +2286,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  COALESCE(low_pressure_pump, pump_low)    AS \"Bomba baja presión\",\n  COALESCE(high_pressure_pump, pump_high)  AS \"Bomba alta presión\",\n  COALESCE(well_pump, pump_inlet)          AS \"Bomba de pozo\",\n  transfer_pump                            AS \"Bomba transferencia\",\n  COALESCE(flush_valve, valve_flush)       AS \"Válvula flush\",\n  COALESCE(inlet_valve, valve_inlet)       AS \"Válvula entrada\",\n  COALESCE(dosing_pump, pump_dose)         AS \"Bomba dosificadora\"\nFROM telemetry_outputs\nWHERE device_id = '$device'\nORDER BY time DESC\nLIMIT 1;",
+          "rawSql": "SELECT\n  COALESCE(low_pressure_pump, pump_low)    AS \"Bomba baja presi\u00f3n\",\n  COALESCE(high_pressure_pump, pump_high)  AS \"Bomba alta presi\u00f3n\",\n  COALESCE(well_pump, pump_inlet)          AS \"Bomba de pozo\",\n  transfer_pump                            AS \"Bomba transferencia\",\n  COALESCE(flush_valve, valve_flush)       AS \"V\u00e1lvula flush\",\n  COALESCE(inlet_valve, valve_inlet)       AS \"V\u00e1lvula entrada\",\n  COALESCE(dosing_pump, pump_dose)         AS \"Bomba dosificadora\"\nFROM telemetry_outputs\nWHERE device_id = '$device'\nORDER BY time DESC\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2309,6 +2309,109 @@
       ],
       "title": "Salidas Digitales",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "dfdcy982omdxce"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "PHASE_FAILURE": {
+                  "color": "red",
+                  "index": 0,
+                  "text": "\u26a1 Falta de fase"
+                },
+                "FLOW_LOW": {
+                  "color": "orange",
+                  "index": 1,
+                  "text": "\ud83d\udca7 Caudal bajo"
+                },
+                "RECOVERY_LOW": {
+                  "color": "orange",
+                  "index": 2,
+                  "text": "\ud83d\udcc9 Recovery bajo"
+                },
+                "RECOVERY_HIGH": {
+                  "color": "orange",
+                  "index": 3,
+                  "text": "\ud83d\udcc8 Recovery alto"
+                },
+                "PRESSURE_MEMBRANE_HIGH": {
+                  "color": "red",
+                  "index": 4,
+                  "text": "\ud83d\udd27 Presi\u00f3n membrana alta"
+                },
+                "MAX_RETRIES": {
+                  "color": "red",
+                  "index": 5,
+                  "text": "\ud83d\udd01 Reintentos agotados"
+                },
+                "": {
+                  "color": "green",
+                  "index": 6,
+                  "text": "\u2705 Sin falla"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "noValue": "\u2705 Sin falla"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 5,
+        "x": 7,
+        "y": 1
+      },
+      "id": 500,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "dfdcy982omdxce"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT fault_reason FROM device_status WHERE device_id = '$device';",
+          "refId": "A"
+        }
+      ],
+      "title": "\u26a0\ufe0f Causa de falla",
+      "type": "stat"
     }
   ],
   "preload": false,

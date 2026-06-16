@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS telemetry_state (
     state           TEXT            NOT NULL,
     state_numeric   SMALLINT        NOT NULL,
     running         BOOLEAN,
-    retry_count     SMALLINT
+    retry_count     SMALLINT,
+    fault_reason    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_state_device_time
     ON telemetry_state (device_id, time DESC);
@@ -141,6 +142,7 @@ CREATE TABLE IF NOT EXISTS device_status (
 
     -- Estado operativo
     state                   TEXT,
+    fault_reason            TEXT,
 
     -- Último diagnóstico del ciclo actual
     last_severity           TEXT,
