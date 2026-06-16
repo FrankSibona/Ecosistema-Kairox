@@ -1756,7 +1756,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Agua cruda"
+              "options": "Presión OK"
             },
             "properties": [
               {
@@ -1767,7 +1767,35 @@
                       "false": {
                         "color": "red",
                         "index": 1,
-                        "text": "Sin Agua"
+                        "text": "Baja presión"
+                      },
+                      "true": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "OK"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Agua disponible"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "red",
+                        "index": 1,
+                        "text": "Sin agua"
                       },
                       "true": {
                         "color": "green",
@@ -1812,6 +1840,34 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "Nivel pozo"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "red",
+                        "index": 1,
+                        "text": "Nivel bajo"
+                      },
+                      "true": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "OK"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "Dosificación"
             },
             "properties": [
@@ -1840,7 +1896,35 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Presostato"
+              "options": "Ablandador"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "green",
+                        "index": 1,
+                        "text": "Disponible"
+                      },
+                      "true": {
+                        "color": "orange",
+                        "index": 0,
+                        "text": "Regenerando"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Tanque permeado"
             },
             "properties": [
               {
@@ -1851,12 +1935,96 @@
                       "false": {
                         "color": "red",
                         "index": 1,
-                        "text": "Baja presión"
+                        "text": "Bajo"
                       },
                       "true": {
                         "color": "green",
                         "index": 0,
                         "text": "OK"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Demanda permeado"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "super-light-blue",
+                        "index": 1,
+                        "text": "Sin demanda"
+                      },
+                      "true": {
+                        "color": "blue",
+                        "index": 0,
+                        "text": "Activa"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Demanda final"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "super-light-blue",
+                        "index": 1,
+                        "text": "Sin demanda"
+                      },
+                      "true": {
+                        "color": "blue",
+                        "index": 0,
+                        "text": "Activa"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Falla de fase"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "green",
+                        "index": 1,
+                        "text": "OK"
+                      },
+                      "true": {
+                        "color": "red",
+                        "index": 0,
+                        "text": "FALLA"
                       }
                     },
                     "type": "value"
@@ -1885,7 +2053,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  demand      AS \"Demanda\",\r\n  raw_water_ok    AS \"Agua cruda\",\r\n  dose_ok     AS \"Dosificación\",\r\n  pressure_switch  AS \"Presostato\",\r\n  feed_tank_level_low    AS \"Reserva 1\",\r\n  spare2    AS \"Reserva 2\"\r\nFROM telemetry_inputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\n  COALESCE(pressure_ok, pressure_switch)        AS \"Presión OK\",\n  COALESCE(raw_water_available, raw_water_ok)   AS \"Agua disponible\",\n  demand                                         AS \"Demanda\",\n  COALESCE(well_low_level, feed_tank_level_low) AS \"Nivel pozo\",\n  COALESCE(dosing_ok, dose_ok)                  AS \"Dosificación\",\n  softener_regenerating                          AS \"Ablandador\",\n  permeate_tank_low                              AS \"Tanque permeado\",\n  permeate_tank_demand                           AS \"Demanda permeado\",\n  final_tank_demand                              AS \"Demanda final\",\n  phase_failure                                  AS \"Falla de fase\"\nFROM telemetry_inputs\nWHERE device_id = '$device'\nORDER BY time DESC\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1969,6 +2137,146 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "Bomba baja presión"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "super-light-blue",
+                        "index": 1,
+                        "text": "OFF"
+                      },
+                      "true": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "ON"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bomba alta presión"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "super-light-blue",
+                        "index": 1,
+                        "text": "OFF"
+                      },
+                      "true": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "ON"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bomba de pozo"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "super-light-blue",
+                        "index": 1,
+                        "text": "OFF"
+                      },
+                      "true": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "ON"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bomba transferencia"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "super-light-blue",
+                        "index": 1,
+                        "text": "OFF"
+                      },
+                      "true": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "ON"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Válvula flush"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "super-light-blue",
+                        "index": 1,
+                        "text": "Cerrada"
+                      },
+                      "true": {
+                        "color": "blue",
+                        "index": 0,
+                        "text": "Abierta"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "Válvula entrada"
             },
             "properties": [
@@ -1986,6 +2294,34 @@
                         "color": "blue",
                         "index": 0,
                         "text": "Abierta"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bomba dosificadora"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "false": {
+                        "color": "super-light-blue",
+                        "index": 1,
+                        "text": "OFF"
+                      },
+                      "true": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "ON"
                       }
                     },
                     "type": "value"
@@ -2014,7 +2350,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\r\n  pump_low     AS \"Bomba baja\",\r\n  pump_high    AS \"Bomba alta\",\r\n  pump_inlet   AS \"Bomba entrada\",\r\n  pump_dose    AS \"Dosificación\",\r\n  valve_flush  AS \"Flush\",\r\n  valve_inlet  AS \"Válvula entrada\"\r\nFROM telemetry_outputs\r\nWHERE device_id = '$device'\r\nORDER BY time DESC\r\nLIMIT 1;",
+          "rawSql": "SELECT\n  COALESCE(low_pressure_pump, pump_low)    AS \"Bomba baja presión\",\n  COALESCE(high_pressure_pump, pump_high)  AS \"Bomba alta presión\",\n  COALESCE(well_pump, pump_inlet)          AS \"Bomba de pozo\",\n  transfer_pump                            AS \"Bomba transferencia\",\n  COALESCE(flush_valve, valve_flush)       AS \"Válvula flush\",\n  COALESCE(inlet_valve, valve_inlet)       AS \"Válvula entrada\",\n  COALESCE(dosing_pump, pump_dose)         AS \"Bomba dosificadora\"\nFROM telemetry_outputs\nWHERE device_id = '$device'\nORDER BY time DESC\nLIMIT 1;",
           "refId": "A",
           "sql": {
             "columns": [
