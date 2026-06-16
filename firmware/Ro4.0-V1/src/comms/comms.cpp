@@ -350,7 +350,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "1.2.0";
+const char* fw_version = "2.0.0";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -428,31 +428,39 @@ static String floatOrNull(float v) {
 // Called from both on-change detection and periodic heartbeat so the two
 // paths can never diverge when fields are added or renamed.
 
-static void publishOutputs(Control& c, long ts) {
-    OutputsState out = c.getOutputs();
+static void publishOutputs(long ts) {
+    const IOMapConfig& iomap = ioMapGet();
     String json = "{";
     json += "\"device_id\":\"" + device_id + "\",";
-    json += "\"ts\":" + String(ts) + ",";
-    json += "\"pump_low\":"    + String(out.pumpLow)    + ",";
-    json += "\"pump_high\":"   + String(out.pumpHigh)   + ",";
-    json += "\"pump_inlet\":"  + String(out.pumpInlet)  + ",";
-    json += "\"pump_dose\":"   + String(out.pumpDose)   + ",";
-    json += "\"valve_flush\":" + String(out.valveFlush) + ",";
-    json += "\"valve_inlet\":" + String(out.valveInlet);
+    json += "\"fw_version\":\"" + String(fw_version) + "\",";
+    json += "\"ts\":" + String(ts);
+    for (uint8_t i = 0; i < (uint8_t)LogicalOutput::COUNT; i++) {
+        const IOPinConfig& pin = iomap.outputs[i];
+        if (pin.gpio == IOMAP_GPIO_NONE) continue;
+        bool raw     = digitalRead(pin.gpio);
+        bool logical = pin.invert ? !raw : raw;
+        json += ",\"";
+        json += logicalOutputName((LogicalOutput)i);
+        json += "\":";
+        json += logical ? "1" : "0";
+    }
     json += "}";
     mqttClient.publish(baseTopic("outputs").c_str(), json.c_str());
 }
 
 static void publishInputs(Sensors& s, long ts) {
+    const IOMapConfig& iomap = ioMapGet();
     String json = "{";
     json += "\"device_id\":\"" + device_id + "\",";
-    json += "\"ts\":" + String(ts) + ",";
-    json += "\"demand\":"              + String(s.getD1()) + ",";
-    json += "\"raw_water_ok\":"        + String(s.getD2()) + ",";
-    json += "\"dose_ok\":"             + String(s.getD3()) + ",";
-    json += "\"pressure_switch\":"     + String(s.getD4()) + ",";
-    json += "\"feed_tank_level_low\":" + String(s.getD5()) + ",";
-    json += "\"spare2\":"              + String(s.getD6());
+    json += "\"fw_version\":\"" + String(fw_version) + "\",";
+    json += "\"ts\":" + String(ts);
+    for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
+        if (iomap.inputs[i].gpio == IOMAP_GPIO_NONE) continue;
+        json += ",\"";
+        json += logicalInputName((LogicalInput)i);
+        json += "\":";
+        json += s.getSignal((LogicalInput)i) ? "1" : "0";
+    }
     json += "}";
     mqttClient.publish(baseTopic("inputs").c_str(), json.c_str());
 }
@@ -707,6 +715,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
         {
             String json = "{";
             json += "\"device_id\":\"" + device_id + "\",";
+            json += "\"fw_version\":\"" + String(fw_version) + "\",";
             json += "\"ts\":" + String(ts) + ",";
             json += "\"state\":\"" + String(c.getStateName()) + "\",";
             json += "\"running\":" + String(c.isRunning()) + ",";
@@ -718,7 +727,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
         }
 
         // ===== OUTPUTS =====
-        publishOutputs(c, ts);
+        publishOutputs(ts);
 
         // ===== INPUTS =====
         publishInputs(s, ts);
@@ -797,6 +806,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
 
         String json = "{";
         json += "\"device_id\":\"" + device_id + "\",";
+        json += "\"fw_version\":\"" + String(fw_version) + "\",";
         json += "\"ts\":" + String(ts) + ",";
         json += "\"state\":\"" + currentState + "\",";
         json += "\"running\":" + String(c.isRunning()) + ",";
@@ -808,24 +818,39 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
     }
 
     // ================= OUTPUTS =================
-    static OutputsState lastOut = {0};
-
-    OutputsState out = c.getOutputs();
-
-    if (memcmp(&out, &lastOut, sizeof(out)) != 0) {
-        lastOut = out;
-        publishOutputs(c, ts);
+    // Bitmask over all configured logical outputs (bit i = LogicalOutput i).
+    // digitalRead on an OUTPUT-mode pin returns the last driven level on ESP32.
+    {
+        static uint8_t lastOutMask = 0xFF;  // invalid → forces first publish
+        const IOMapConfig& outmap = ioMapGet();
+        uint8_t curOutMask = 0;
+        for (uint8_t i = 0; i < (uint8_t)LogicalOutput::COUNT; i++) {
+            const IOPinConfig& pin = outmap.outputs[i];
+            if (pin.gpio == IOMAP_GPIO_NONE) continue;
+            bool raw     = digitalRead(pin.gpio);
+            bool logical = pin.invert ? !raw : raw;
+            if (logical) curOutMask |= (1u << i);
+        }
+        if (curOutMask != lastOutMask) {
+            lastOutMask = curOutMask;
+            publishOutputs(ts);
+        }
     }
 
     // ================= INPUTS =================
-    static String lastInputs = "";
-
-    String inputs = String(s.getD1()) + String(s.getD2()) + String(s.getD3()) +
-                    String(s.getD4()) + String(s.getD5()) + String(s.getD6());
-
-    if (inputs != lastInputs) {
-        lastInputs = inputs;
-        publishInputs(s, ts);
+    // Bitmask over all configured logical inputs (bit i = LogicalInput i).
+    {
+        static uint16_t lastInMask = 0xFFFF;  // invalid → forces first publish
+        const IOMapConfig& inmap = ioMapGet();
+        uint16_t curInMask = 0;
+        for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
+            if (inmap.inputs[i].gpio == IOMAP_GPIO_NONE) continue;
+            if (s.getSignal((LogicalInput)i)) curInMask |= (1u << i);
+        }
+        if (curInMask != lastInMask) {
+            lastInMask = curInMask;
+            publishInputs(s, ts);
+        }
     }
 
     // ================= HEARTBEAT + I/O SYNC (every 10s) =================
@@ -850,7 +875,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
             mqttClient.publish(baseTopic("heartbeat").c_str(), json.c_str());
         }
 
-        publishOutputs(c, ts);
+        publishOutputs(ts);
         publishInputs(s, ts);
     }
 

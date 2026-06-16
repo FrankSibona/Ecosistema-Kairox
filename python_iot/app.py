@@ -2095,12 +2095,20 @@ class MessageProcessor:
         "volume_rechazo_l": "volume_reject_l",
     }
     _INPUTS_ALIASES = {
-        "crudo_ok":   "raw_water_ok",
-        "presostato": "pressure_switch",
-        "reserva1":          "feed_tank_level_low",
-        "flotante_pozo":       "feed_tank_level_low",
-        "reserva2":   "spare2",
+        "crudo_ok":      "raw_water_ok",
+        "presostato":    "pressure_switch",
+        "reserva1":      "feed_tank_level_low",
+        "flotante_pozo": "feed_tank_level_low",
+        "reserva2":      "spare2",
     }
+
+    @staticmethod
+    def _is_fw_v2(fw_version: str) -> bool:
+        """True for firmware >= 2.0.0 (semantic /inputs and /outputs)."""
+        try:
+            return int(fw_version.split(".")[0]) >= 2
+        except (ValueError, IndexError, AttributeError):
+            return False
 
     def _handle_process(self, device_id, timestamp, data):
         data = {self._PROCESS_ALIASES.get(k, k): v for k, v in data.items()}
@@ -2169,6 +2177,16 @@ class MessageProcessor:
             self._run_analytics(device_id, timestamp, tracker.get_process(device_id) or {})
 
     def _handle_inputs(self, device_id, timestamp, data):
+        if self._is_fw_v2(data.get("fw_version", "")):
+            # v2: logical signal names, only configured signals present.
+            # DB schema not yet migrated — update tracker only for validation.
+            signals = {k: validate_bool(v)
+                       for k, v in data.items()
+                       if k not in ("device_id", "ts", "fw_version")}
+            log.debug(f"[{device_id}] /inputs v2: {signals}")
+            tracker.update_inputs(device_id, signals)
+            return
+        # v1: legacy hardcoded pin names
         data = {self._INPUTS_ALIASES.get(k, k): v for k, v in data.items()}
         inputs = {k: validate_bool(data.get(k))
                   for k in ("demand","raw_water_ok","dose_ok","pressure_switch","feed_tank_level_low","spare2")}
@@ -2181,6 +2199,16 @@ class MessageProcessor:
         tracker.update_inputs(device_id, inputs)
 
     def _handle_outputs(self, device_id, timestamp, data):
+        if self._is_fw_v2(data.get("fw_version", "")):
+            # v2: logical output names, only configured signals present.
+            # DB schema not yet migrated — update tracker only for validation.
+            signals = {k: validate_bool(v)
+                       for k, v in data.items()
+                       if k not in ("device_id", "ts", "fw_version")}
+            log.debug(f"[{device_id}] /outputs v2: {signals}")
+            tracker.update_outputs(device_id, signals)
+            return
+        # v1: legacy hardcoded relay names
         outputs = {
             "pump_low":    validate_bool(data.get("pump_low")),
             "pump_high":   validate_bool(data.get("pump_high")),
