@@ -870,7 +870,8 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
             json += "\"device_id\":\"" + device_id + "\",";
             json += "\"ts\":" + String(ts) + ",";
             json += "\"status\":\"online\",";
-            json += "\"state\":\"" + String(c.getStateName()) + "\"";
+            json += "\"state\":\"" + String(c.getStateName()) + "\",";
+            json += "\"fault_reason\":\"" + String(c.getFaultReasonName()) + "\"";
             json += "}";
             mqttClient.publish(baseTopic("heartbeat").c_str(), json.c_str());
         }

@@ -2267,13 +2267,20 @@ class MessageProcessor:
         # restart. /state remains the primary channel for FSM transition events.
         # If the field is absent (older firmware), this is a no-op.
         reported_state = data.get("state", "").upper()
+        hb_fault_reason = data.get("fault_reason") or None
+        effective_reason = hb_fault_reason if reported_state == "FAULT" else None
         if reported_state in self._FSM_STATES:
             db.execute(
-                "INSERT INTO device_status (device_id,last_seen,online,state) "
-                "VALUES (%s,%s,TRUE,%s) "
+                "INSERT INTO device_status (device_id,last_seen,online,state,fault_reason) "
+                "VALUES (%s,%s,TRUE,%s,%s) "
                 "ON CONFLICT (device_id) DO UPDATE "
-                "SET last_seen=EXCLUDED.last_seen, online=TRUE, state=EXCLUDED.state",
-                (device_id, timestamp, reported_state),
+                "SET last_seen=EXCLUDED.last_seen, online=TRUE, state=EXCLUDED.state, "
+                # When FAULT: keep existing reason if new payload has none (old firmware).
+                # When non-FAULT: clear to NULL so the panel shows "Sin falla".
+                "fault_reason=CASE WHEN EXCLUDED.state='FAULT' "
+                "THEN COALESCE(EXCLUDED.fault_reason, device_status.fault_reason) "
+                "ELSE NULL END",
+                (device_id, timestamp, reported_state, effective_reason),
             )
         else:
             db.execute(
