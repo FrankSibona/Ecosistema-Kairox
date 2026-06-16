@@ -35,21 +35,23 @@ mosquitto_sub -v -t 'fyntek/<device_id>/state' -t 'fyntek/<device_id>/outputs'
 
 ## Caso 1 — Arranque por demanda de permeado
 
-Objetivo: `permeate_tank_demand=1` + `softener_regenerating=0` habilita
-`process_permits["ro"]` → RO entra en STARTING → PRODUCING (sujeto a
-`presionOK`, sin cambios respecto a 1.1.5).
+Objetivo: `demand=1` (GPIO27) + `softener_regenerating=0` (GPIO25) →
+FSM evalúa `demandaOK && crudoOK && permitOk` → STARTING → PRODUCING.
+
+La señal `demand` (float del tanque de permeado) dispara el arranque y el
+flush al terminar. `process_permits["ro"]` controla solo el interlock del
+ablandador (`NOT softener_regenerating`).
 
 | Paso | Acción | Esperado |
 |---|---|---|
-| 1 | Forzar `permeate_tank_demand=0` (GPIO5 abierto/pull-up) | `state=IDLE` |
-| 2 | Cerrar contacto en GPIO5 (`permeate_tank_demand=1`) | Serial: `[EVENT] Demanda detectada -> arranque`; `state=STARTING` |
+| 1 | GPIO27 abierto (`demand=0`, pull-up) | `state=IDLE` |
+| 2 | Cerrar contacto en GPIO27 (`demand=1`) | Serial: `[EVENT] Demanda detectada -> arranque`; `state=STARTING` |
 | 3 | Esperar `pressure_stabilization_delay_sec` (default 10s) | Bomba baja presión (R1) ON |
-| 4 | Esperar `startup_timeout_sec` (default 5s) con presostato OK (GPIO33) | Serial: `[EVENT] Presión OK`; `state=PRODUCING`; R2 (alta presión) ON |
+| 4 | Esperar `startup_timeout_sec` (default 5s) con presostato OK (GPIO26) | Serial: `[EVENT] Presión OK`; `state=PRODUCING`; R2 (alta presión) ON |
 | 5 | `/state` MQTT | `state="PRODUCING"`, `fault_reason=""` |
 
 Si el presostato no cierra a tiempo: `retryCount++`, `state=IDLE`,
-`[FAULT] Presión no alcanzada` — comportamiento idéntico a 1.1.5 (punto 1,
-no afectado por `process_permits`).
+`[FAULT] Presión no alcanzada`.
 
 ---
 
@@ -66,7 +68,7 @@ el término `softener_regenerating` (OR).
 | 2 | Cerrar contacto en GPIO23 (`softener_regenerating=1`) | `permitOk=false` → Serial `[FAULT] Pérdida condición`; `state=IDLE`; R1/R2 OFF |
 | 3 | Verificar well_pump | Sigue **ON** — `independent_outputs["well_pump"] = ro_producing OR softener_regenerating`; aunque `ro_producing` ya es `false`, `softener_regenerating=1` lo mantiene ON |
 | 4 | `/outputs` MQTT (`pump_inlet`) | `true` |
-| 5 | `permeate_tank_demand=1` sostenido durante este paso | RO permanece en IDLE — no reintenta STARTING mientras `softener_regenerating=1` |
+| 5 | `demand=1` (GPIO27) sostenido durante este paso | RO permanece en IDLE — `permitOk=false` bloquea el arranque mientras `softener_regenerating=1` |
 
 Nota de instrumentación: `transfer_pump` no se publica en `/outputs` (no es
 parte de `OutputsState`) — verificar con multímetro/LED en GPIO12 si no hay

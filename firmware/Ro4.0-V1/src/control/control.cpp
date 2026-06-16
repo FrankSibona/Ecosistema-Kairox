@@ -162,10 +162,14 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
         case IDLE:
             stopAll();
 
-            if (demandaOK && crudoOK) {
+            {
+                // process_permits["ro"] actúa como interlock en IDLE: aunque haya
+                // demanda y agua cruda, si un permiso externo está bloqueado
+                // (ej. softener_regenerating) el arranque no se habilita.
+                bool permitOk = evalRule(rulesGet().process_permits[(uint8_t)ProcessId::RO], ruleInputs, ruleDerived);
                 const ProcessConfig& pc = processConfigGet();
                 bool retryWaiting = retryCount > 0 && (millis() - retryTimer < pc.retry_interval_sec * 1000UL);
-                if (!retryWaiting) {
+                if (demandaOK && crudoOK && permitOk && !retryWaiting) {
                     Serial.println("[EVENT] Demanda detectada -> arranque");
                     state = STARTING;
                     stateStartTime = millis();
