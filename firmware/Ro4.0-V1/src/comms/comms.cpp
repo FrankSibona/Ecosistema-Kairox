@@ -15,6 +15,7 @@
 #include "../io/io_map.h"
 #include "../io/io_catalog.h"
 #include "../rules/rules.h"
+#include "../control/process_config.h"
 #include <config.h>
 
 // ================= DEVICE ID =================
@@ -43,13 +44,15 @@ static const char* receiveResultName(ReceiveResult r) {
     }
 }
 
-// Aplica un objeto JSON {"gpio":.., "mode":.., "invert":..} sobre el
-// IOPinConfig actual (partial update por campo):
+// Aplica un objeto JSON {"gpio":.., "mode":.., "invert":.., "default_value":..,
+// "debounce_ms":..} sobre el IOPinConfig actual (partial update por campo):
 //   - "gpio" ausente   -> conserva el gpio actual
 //   - "gpio": null     -> IOMAP_GPIO_NONE (señal sin pin asignado)
 //   - "gpio": <num>    -> ese GPIO
 //   - "mode" solo aplica si hasMode (inputs); valores desconocidos se ignoran
 //   - "invert" ausente -> conserva el valor actual
+//   - "default_value"/"debounce_ms" solo aplican si hasMode (inputs); ausentes
+//     -> conservan el valor actual (compat con payloads de backends viejos)
 static IOPinConfig parseIOEntry(JsonObject obj, const IOPinConfig& cur, bool hasMode) {
     IOPinConfig out = cur;
     if (obj.containsKey("gpio")) {
@@ -63,6 +66,12 @@ static IOPinConfig parseIOEntry(JsonObject obj, const IOPinConfig& cur, bool has
     }
     if (obj.containsKey("invert")) {
         out.invert = (obj["invert"].as<int>() != 0) ? 1 : 0;
+    }
+    if (hasMode && obj.containsKey("default_value")) {
+        out.default_value = (obj["default_value"].as<int>() != 0) ? 1 : 0;
+    }
+    if (hasMode && obj.containsKey("debounce_ms")) {
+        out.debounce_ms = (uint16_t)obj["debounce_ms"].as<unsigned int>();
     }
     return out;
 }
@@ -178,6 +187,8 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         incoming.pressure_brine_max_voltage       = doc["pressure_brine_max_voltage"]       | cur.pressure_brine_max_voltage;
         incoming.pressure_brine_min_bar           = doc["pressure_brine_min_bar"]           | cur.pressure_brine_min_bar;
         incoming.pressure_brine_max_bar           = doc["pressure_brine_max_bar"]           | cur.pressure_brine_max_bar;
+        incoming.flow_protection_enabled          = doc["flow_protection_enabled"]          | cur.flow_protection_enabled;
+        incoming.recovery_protection_enabled      = doc["recovery_protection_enabled"]      | cur.recovery_protection_enabled;
         incoming.updated_at                = doc["updated_at"]                | (unsigned long)0;
 
         s_sensors->setConfig(incoming);
@@ -279,6 +290,31 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
+    // ── /process_config ──────────────────────────────────────────────────────
+    // Retained: parámetros de temporización FSM. Partial update — campos ausentes
+    // conservan el valor actual (mismo patrón que /config, /iomap, /rules).
+    char proccfg_topic[76];
+    snprintf(proccfg_topic, sizeof(proccfg_topic), "fyntek/%s/process_config", device_id.c_str());
+    if (strcmp(topic, proccfg_topic) == 0) {
+        StaticJsonDocument<512> doc;
+        DeserializationError err = deserializeJson(doc, payload, length);
+        if (err) {
+            Serial.print("[PROCCFG] JSON inválido: ");
+            Serial.println(err.c_str());
+            return;
+        }
+        ProcessConfig cur = processConfigGet();
+        ProcessConfig incoming;
+        incoming.pressure_stabilization_delay_sec = doc["pressure_stabilization_delay_sec"] | cur.pressure_stabilization_delay_sec;
+        incoming.startup_timeout_sec              = doc["startup_timeout_sec"]              | cur.startup_timeout_sec;
+        incoming.retry_interval_sec               = doc["retry_interval_sec"]               | cur.retry_interval_sec;
+        incoming.max_retries                      = doc["max_retries"]                      | cur.max_retries;
+        incoming.flush_duration_sec               = doc["flush_duration_sec"]               | cur.flush_duration_sec;
+        incoming.updated_at                       = doc["updated_at"]                       | (uint32_t)0;
+        processConfigSet(incoming);
+        return;
+    }
+
     // ── /diag/ctrl ───────────────────────────────────────────────────────────
     char diag_topic[72];
     snprintf(diag_topic, sizeof(diag_topic), "fyntek/%s/diag/ctrl", device_id.c_str());
@@ -314,7 +350,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "1.1.8";
+const char* fw_version = "1.2.0";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -474,6 +510,7 @@ void Comms::reconnect() {
         mqttClient.subscribe(baseTopic("config/reset").c_str());
         mqttClient.subscribe(baseTopic("iomap").c_str());
         mqttClient.subscribe(baseTopic("rules").c_str());
+        mqttClient.subscribe(baseTopic("process_config").c_str());
         mqttClient.subscribe(baseTopic("diag/ctrl").c_str());
         mqttClient.subscribe(baseTopic("diag/flightrec/get").c_str());
 
@@ -687,6 +724,23 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
 
         // ===== INPUTS =====
         publishInputs(s, ts);
+
+        // ===== PROCESS CONFIG (retained) =====
+        {
+            const ProcessConfig& pc = processConfigGet();
+            char json[256];
+            snprintf(json, sizeof(json),
+                "{\"pressure_stabilization_delay_sec\":%u,\"startup_timeout_sec\":%u,"
+                "\"retry_interval_sec\":%u,\"max_retries\":%u,\"flush_duration_sec\":%u,"
+                "\"updated_at\":%u}",
+                (unsigned)pc.pressure_stabilization_delay_sec,
+                (unsigned)pc.startup_timeout_sec,
+                (unsigned)pc.retry_interval_sec,
+                (unsigned)pc.max_retries,
+                (unsigned)pc.flush_duration_sec,
+                (unsigned)pc.updated_at);
+            mqttClient.publish(baseTopic("process_config").c_str(), json, true);
+        }
     }
 
 

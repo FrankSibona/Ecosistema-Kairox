@@ -31,9 +31,11 @@ struct SensorConfig {
     float         min_flow_lpm              = MIN_FLOW_LPM_DEFAULT;
     float         max_flow_lpm              = MAX_FLOW_LPM_DEFAULT;
     uint32_t      flow_fault_delay_sec      = FLOW_FAULT_DELAY_SEC_DEFAULT;
+    uint8_t       flow_protection_enabled   = FLOW_PROTECTION_ENABLED_DEFAULT;
     float         min_recovery_pct          = MIN_RECOVERY_PCT_DEFAULT;
     float         max_recovery_pct          = MAX_RECOVERY_PCT_DEFAULT;
     uint32_t      recovery_fault_delay_sec  = RECOVERY_FAULT_DELAY_SEC_DEFAULT;
+    uint8_t       recovery_protection_enabled = RECOVERY_PROTECTION_ENABLED_DEFAULT;
     // ── Calibración de presión (voltaje→bar), por canal ──────────────────────
     // *_enabled=0 (default): pressure_membrane_bar/pressure_brine_bar usan la
     // fórmula legacy (sin cambios). *_enabled=1: calibración lineal min/max.
@@ -108,20 +110,13 @@ public:
     bool getD5();
     bool getD6();
 
-    bool getDemand();
-    bool getCrudoOK();
-    bool getDoseOK();
-    bool getPresostato();
-    bool getNivelBajoPozo();   // D5 — flotante nivel bajo; HIGH = cisterna baja → bomba pozo ON
-
-    bool demanda();
-    bool crudoDisponible();
-    bool presionOK();
-
-    // Lectura genérica vía io_map — resuelve GPIO/modo/invert para la señal
-    // lógica indicada. IOMAP_GPIO_NONE (sin pin asignado) -> false. Usada por
-    // el motor de reglas (rules.h) para construir ruleInputs[] cada loop.
-    bool readSignal(LogicalInput sig) const;
+    // Lectura desacoplada vía io_map — resuelve GPIO/modo/invert/default_value
+    // para la señal lógica indicada y aplica el debounce simétrico configurado
+    // (debounce_ms, 0 = sin debounce). gpio==IOMAP_GPIO_NONE -> default_value.
+    // Calculada una vez por loop en update() (cacheada). Usada por el motor de
+    // reglas (rules.h) para construir ruleInputs[] y por la FSM (reemplaza
+    // demanda()/crudoDisponible()/presionOK()).
+    bool getSignal(LogicalInput sig) const;
 
     // ── Config management ────────────────────────────────────────────────────
     // setConfig(): validates, compares updated_at, applies, persists to NVS.
@@ -150,6 +145,12 @@ private:
     unsigned long lastSaveTime = 0;
 
     bool d1, d2, d3, d4, d5, d6;
+
+    // ── Estado de debounce simétrico por señal lógica (getSignal()) ──────────
+    bool          _sigRaw[(uint8_t)LogicalInput::COUNT]    = {false};
+    bool          _sigStable[(uint8_t)LogicalInput::COUNT] = {false};
+    unsigned long _sigEdgeStart[(uint8_t)LogicalInput::COUNT] = {0};
+    void updateSignals();
 
     Preferences prefs;  // used exclusively for totals (namespace "kairox")
 

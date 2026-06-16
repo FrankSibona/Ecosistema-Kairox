@@ -11,27 +11,36 @@ static IOMapConfig _cfg;
 static IOMapConfig defaultIOMap() {
     IOMapConfig cfg = {};
 
+    // default_value=0/debounce_ms=0 para todas las señales salvo las 3
+    // sobreescritas abajo (demand/raw_water_available/pressure_ok) — ver tabla
+    // de defaults en config.h (IOMAP_VERSION v3).
     for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
-        cfg.inputs[i] = {IOMAP_GPIO_NONE, IOMAP_MODE_PULLUP, 0};
+        cfg.inputs[i] = {IOMAP_GPIO_NONE, IOMAP_MODE_PULLUP, 0, 0, 0};
     }
     for (uint8_t i = 0; i < (uint8_t)LogicalOutput::COUNT; i++) {
-        cfg.outputs[i] = {IOMAP_GPIO_NONE, IOMAP_MODE_PULLUP, 0};
+        cfg.outputs[i] = {IOMAP_GPIO_NONE, IOMAP_MODE_PULLUP, 0, 0, 0};
     }
 
-    cfg.inputs[(uint8_t)LogicalInput::DEMAND]              = {PIN_D1, IOMAP_MODE_PULLUP,   0};
-    cfg.inputs[(uint8_t)LogicalInput::RAW_WATER_AVAILABLE] = {PIN_D2, IOMAP_MODE_PULLUP,   0};
-    cfg.inputs[(uint8_t)LogicalInput::DOSING_OK]           = {PIN_D3, IOMAP_MODE_PULLUP,   0};
-    cfg.inputs[(uint8_t)LogicalInput::PRESSURE_OK]         = {PIN_D4, IOMAP_MODE_PULLDOWN, 0};
-    cfg.inputs[(uint8_t)LogicalInput::WELL_LOW_LEVEL]      = {PIN_D5, IOMAP_MODE_PULLUP,   0};
+    // debounce_ms=2000 reproduce el debounce hoy hardcodeado en control.cpp
+    // (demandaStart/crudoStart/presionStart). default_value aplica solo si
+    // gpio==IOMAP_GPIO_NONE (equipo sin ese sensor cableado):
+    //   - demand: sin sensor de demanda -> false (no hay demanda)
+    //   - raw_water_available: sin sensor de nivel de entrada -> true (se asume agua disponible)
+    //   - pressure_ok: sin presostato -> true (se asume presión OK)
+    cfg.inputs[(uint8_t)LogicalInput::DEMAND]              = {PIN_D1, IOMAP_MODE_PULLUP,   0, 0, 2000};
+    cfg.inputs[(uint8_t)LogicalInput::RAW_WATER_AVAILABLE] = {PIN_D2, IOMAP_MODE_PULLUP,   0, 1, 2000};
+    cfg.inputs[(uint8_t)LogicalInput::DOSING_OK]           = {PIN_D3, IOMAP_MODE_PULLUP,   0, 0, 0};
+    cfg.inputs[(uint8_t)LogicalInput::PRESSURE_OK]         = {PIN_D4, IOMAP_MODE_PULLDOWN, 0, 1, 2000};
+    cfg.inputs[(uint8_t)LogicalInput::WELL_LOW_LEVEL]      = {PIN_D5, IOMAP_MODE_PULLUP,   0, 0, 0};
     // PIN_D6 (reserva) y el resto de entradas (tanques, ablandador) quedan
     // sin asignar por defecto — IOMAP_GPIO_NONE.
 
-    cfg.outputs[(uint8_t)LogicalOutput::LOW_PRESSURE_PUMP]  = {PIN_R1, IOMAP_MODE_PULLUP, 0};
-    cfg.outputs[(uint8_t)LogicalOutput::HIGH_PRESSURE_PUMP] = {PIN_R2, IOMAP_MODE_PULLUP, 0};
-    cfg.outputs[(uint8_t)LogicalOutput::WELL_PUMP]          = {PIN_R3, IOMAP_MODE_PULLUP, 0};
-    cfg.outputs[(uint8_t)LogicalOutput::FLUSH_VALVE]        = {PIN_R5, IOMAP_MODE_PULLUP, 0};
-    cfg.outputs[(uint8_t)LogicalOutput::INLET_VALVE]        = {PIN_R6, IOMAP_MODE_PULLUP, 0};
-    cfg.outputs[(uint8_t)LogicalOutput::DOSING_PUMP]        = {PIN_R4, IOMAP_MODE_PULLUP, 0};
+    cfg.outputs[(uint8_t)LogicalOutput::LOW_PRESSURE_PUMP]  = {PIN_R1, IOMAP_MODE_PULLUP, 0, 0, 0};
+    cfg.outputs[(uint8_t)LogicalOutput::HIGH_PRESSURE_PUMP] = {PIN_R2, IOMAP_MODE_PULLUP, 0, 0, 0};
+    cfg.outputs[(uint8_t)LogicalOutput::WELL_PUMP]          = {PIN_R3, IOMAP_MODE_PULLUP, 0, 0, 0};
+    cfg.outputs[(uint8_t)LogicalOutput::FLUSH_VALVE]        = {PIN_R5, IOMAP_MODE_PULLUP, 0, 0, 0};
+    cfg.outputs[(uint8_t)LogicalOutput::INLET_VALVE]        = {PIN_R6, IOMAP_MODE_PULLUP, 0, 0, 0};
+    cfg.outputs[(uint8_t)LogicalOutput::DOSING_PUMP]        = {PIN_R4, IOMAP_MODE_PULLUP, 0, 0, 0};
     // TRANSFER_PUMP queda sin asignar por defecto — IOMAP_GPIO_NONE.
 
     cfg.updated_at = 0;
@@ -87,6 +96,8 @@ static bool validInputEntry(const IOPinConfig& e) {
     if (e.gpio != IOMAP_GPIO_NONE && e.gpio > 39) return false;
     if (e.mode != IOMAP_MODE_PULLUP && e.mode != IOMAP_MODE_PULLDOWN) return false;
     if (e.invert > 1) return false;
+    if (e.default_value > 1) return false;
+    if (e.debounce_ms > 60000) return false;
     return true;
 }
 

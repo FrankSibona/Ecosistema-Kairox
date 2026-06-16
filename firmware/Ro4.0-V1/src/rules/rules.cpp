@@ -77,8 +77,9 @@ static RulesConfig defaultRules() {
         cfg.fault_rules[i].delay_sec = 0;
     }
 
-    // process_permits["ro"] = AND(raw_water_available) — 1 término. Junto al
-    // override de RAW_WATER_AVAILABLE -> crudoOK (control.cpp), reproduce
+    // process_permits["ro"] = AND(raw_water_available) — 1 término.
+    // ruleInputs[RAW_WATER_AVAILABLE] = Sensors::getSignal(RAW_WATER_AVAILABLE),
+    // ya estabilizado por io_map (debounce_ms=2000 default), reproduciendo
     // exactamente la condición actual `if (!crudoOK || ...)`. pressure_ok NO
     // participa — sigue siendo condición interna de la FSM (presionOK).
     cfg.process_permits[(uint8_t)ProcessId::RO] = RuleConfig{

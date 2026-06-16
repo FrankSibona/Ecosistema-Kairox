@@ -10,13 +10,17 @@
 // pines físicos del ESP32 y señales lógicas del catálogo (io_catalog.h), y
 // lo sincroniza vía MQTT retained (fyntek/{device_id}/iomap).
 //
-// IMPORTANTE — alcance de esta fase:
-//   - Este módulo NO llama pinMode()/digitalRead()/digitalWrite().
-//   - Sensors y Control siguen operando sobre los PIN_* fijos de config.h,
-//     sin cambios de comportamiento ni de hardware.
-//   - ioMapGet() queda disponible para que una fase futura reemplace los
-//     PIN_* fijos por resolución dinámica Pin<->Señal, sin tocar el formato
-//     NVS/MQTT definido aquí.
+// IMPORTANTE — desde IOMAP_VERSION v3:
+//   - Este módulo NO llama digitalRead()/digitalWrite() (solo
+//     ioMapApplyPinModes() llama pinMode()).
+//   - La FSM (control.cpp) y el motor de reglas ya NO leen PIN_D*/PIN_R*
+//     fijos para señales lógicas — usan Sensors::getSignal(LogicalInput),
+//     que resuelve GPIO/modo/invert/default_value/debounce_ms desde este
+//     mapeo. defaultIOMap() reproduce el wiring D1-D6/R1-R6 actual, por lo
+//     que un equipo sin io_map custom en NVS no cambia de comportamiento.
+//   - d1..d6/getD1()-getD6() (sensors.h) SIGUEN leyendo PIN_D1-D6 directo —
+//     son contrato de telemetría/diagnóstico (comms.cpp) y no pasan por
+//     io_map.
 
 #define IOMAP_MODE_PULLUP   0   // INPUT_PULLUP
 #define IOMAP_MODE_PULLDOWN 1   // INPUT_PULLDOWN
@@ -24,9 +28,11 @@
 #define IOMAP_GPIO_NONE 0xFF    // señal lógica sin pin físico asignado
 
 struct IOPinConfig {
-    uint8_t gpio;    // número de GPIO, o IOMAP_GPIO_NONE si no asignado
-    uint8_t mode;    // IOMAP_MODE_* — solo relevante para inputs
-    uint8_t invert;  // 1 = lógica invertida respecto al nivel físico
+    uint8_t  gpio;          // número de GPIO, o IOMAP_GPIO_NONE si no asignado
+    uint8_t  mode;          // IOMAP_MODE_* — solo relevante para inputs
+    uint8_t  invert;        // 1 = lógica invertida respecto al nivel físico
+    uint8_t  default_value; // solo inputs — valor lógico devuelto si gpio==IOMAP_GPIO_NONE
+    uint16_t debounce_ms;   // solo inputs — debounce simétrico aplicado en Sensors::getSignal()
 };
 
 struct IOMapConfig {
@@ -46,7 +52,7 @@ const IOMapConfig& ioMapGet();
 // vez en setup(), después de ioMapInit(). Para D1-D6/R1-R6 duplica el
 // pinMode() ya hecho en Sensors::begin()/Control::begin() — idempotente, sin
 // efecto. Para señales nuevas (sin PIN_* fijo) es lo único necesario para que
-// readSignal()/digitalWrite() funcionen.
+// Sensors::getSignal()/digitalWrite() funcionen.
 void ioMapApplyPinModes();
 
 // Aplica un mapeo entrante (partial update por señal: entradas ausentes o

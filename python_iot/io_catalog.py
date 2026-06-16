@@ -85,23 +85,30 @@ OUTPUT_LABELS = {
 # (ver firmware/Ro4.0-V1/include/config.h PIN_D1..D6 / PIN_R1..R6 y
 # firmware/Ro4.0-V1/src/io/io_map.cpp defaultIOMap()). gpio=None == sin pin
 # asignado (IOMAP_GPIO_NONE/0xFF en firmware).
+#
+# debounce_ms: debounce simétrico aplicado en Sensors::getSignal() (firmware
+# IOMAP_VERSION v3). default_value: valor lógico devuelto si gpio=None ("señal
+# no configurada"). demand/raw_water_available/pressure_ok usan
+# debounce_ms=2000 (reproduce el debounce hoy hardcodeado en control.cpp);
+# raw_water_available/pressure_ok usan default_value=1 (sin sensor -> se
+# asume OK). Resto: debounce_ms=0, default_value=0.
 DEFAULT_IO_MAP = {
     "inputs": {
-        "demand":                {"gpio": 27,   "mode": "pullup",   "invert": 0},
-        "raw_water_available":   {"gpio": 26,   "mode": "pullup",   "invert": 0},
-        "feed_tank_high":        {"gpio": None, "mode": "pullup",   "invert": 0},
-        "feed_tank_low":         {"gpio": None, "mode": "pullup",   "invert": 0},
-        "permeate_tank_high":    {"gpio": None, "mode": "pullup",   "invert": 0},
-        "permeate_tank_low":     {"gpio": None, "mode": "pullup",   "invert": 0},
-        "final_tank_high":       {"gpio": None, "mode": "pullup",   "invert": 0},
-        "final_tank_low":        {"gpio": None, "mode": "pullup",   "invert": 0},
-        "pressure_ok":           {"gpio": 33,   "mode": "pulldown", "invert": 0},
-        "softener_regenerating": {"gpio": None, "mode": "pullup",   "invert": 0},
-        "well_low_level":        {"gpio": 32,   "mode": "pullup",   "invert": 0},
-        "dosing_ok":             {"gpio": 25,   "mode": "pullup",   "invert": 0},
-        "permeate_tank_demand":  {"gpio": None, "mode": "pullup",   "invert": 0},
-        "final_tank_demand":     {"gpio": None, "mode": "pullup",   "invert": 0},
-        "phase_failure":         {"gpio": None, "mode": "pullup",   "invert": 0},
+        "demand":                {"gpio": 27,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 2000},
+        "raw_water_available":   {"gpio": 26,   "mode": "pullup",   "invert": 0, "default_value": 1, "debounce_ms": 2000},
+        "feed_tank_high":        {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "feed_tank_low":         {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "permeate_tank_high":    {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "permeate_tank_low":     {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "final_tank_high":       {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "final_tank_low":        {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "pressure_ok":           {"gpio": 33,   "mode": "pulldown", "invert": 0, "default_value": 1, "debounce_ms": 2000},
+        "softener_regenerating": {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "well_low_level":        {"gpio": 32,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "dosing_ok":             {"gpio": 25,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "permeate_tank_demand":  {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "final_tank_demand":     {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+        "phase_failure":         {"gpio": None, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
     },
     "outputs": {
         "low_pressure_pump":  {"gpio": 4,    "invert": 0},
@@ -164,6 +171,11 @@ def validate_io_map(data: dict) -> dict:
     silenciosamente — el merge con DEFAULT_IO_MAP en la siguiente lectura
     completa los huecos, y el firmware conserva el valor actual para esa
     señal (partial update). Nunca lanza excepción por datos inválidos.
+
+    "default_value"/"debounce_ms" ausentes en `entry` (ej. la UI de Mapeo de
+    E/S no expone estos campos) caen al default del catálogo para esa señal
+    — NO a 0/false — para no desarmar silenciosamente el debounce/safe-default
+    de demand/raw_water_available/pressure_ok en cada guardado desde la UI.
     """
     out = {"inputs": {}, "outputs": {}}
     for name, entry in (data.get("inputs") or {}).items():
@@ -175,10 +187,17 @@ def validate_io_map(data: dict) -> dict:
         mode = entry.get("mode")
         if mode not in ("pullup", "pulldown"):
             mode = "pullup"
+        catalog_defaults = DEFAULT_IO_MAP["inputs"][name]
+        debounce_ms = entry.get("debounce_ms", catalog_defaults["debounce_ms"])
+        if not (isinstance(debounce_ms, int) and 0 <= debounce_ms <= 60000):
+            debounce_ms = catalog_defaults["debounce_ms"]
+        default_value = entry.get("default_value", catalog_defaults["default_value"])
         out["inputs"][name] = {
             "gpio": gpio,
             "mode": mode,
             "invert": 1 if entry.get("invert") else 0,
+            "default_value": 1 if default_value else 0,
+            "debounce_ms": debounce_ms,
         }
     for name, entry in (data.get("outputs") or {}).items():
         if name not in LOGICAL_OUTPUTS or not isinstance(entry, dict):

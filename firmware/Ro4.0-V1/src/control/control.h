@@ -99,10 +99,6 @@ private:
     // consumeFaultEvent() reads and clears it atomically.
     bool          _justFaulted         = false;
 
-    unsigned long demandaStart = 0;
-    unsigned long crudoStart   = 0;
-    unsigned long presionStart = 0;
-
     // 🔥 NUEVO: estado REAL de salidas
     OutputsState outputs;
 
@@ -127,4 +123,9 @@ private:
     // Debounce vía delay_sec, mismo patrón que checkMembraneHighPressure().
     // Evaluada en STARTING y PRODUCING con ruleInputs[]/ruleDerived[] crudos.
     bool checkFaultRules(const bool* ruleInputs, const bool* ruleDerived);
+
+    // Protecciones de caudal y recovery — extraídas del inline de PRODUCING.
+    // Respetan *_protection_enabled de SensorConfig (guardado de NVS + cfg_version 2).
+    bool checkFlowProtection(Sensors& s);
+    bool checkRecoveryProtection(Sensors& s);
 };

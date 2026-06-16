@@ -119,6 +119,7 @@ from email.mime.text import MIMEText
 import alert_config as acfg
 import io_catalog
 import rule_catalog
+import process_config_catalog
 from collections import deque, defaultdict
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional, Dict, List, Any
@@ -3079,7 +3080,8 @@ def get_config(device_id):
         "pressure_brine_enabled,pressure_brine_min_voltage,pressure_brine_max_voltage,"
         "pressure_brine_min_bar,pressure_brine_max_bar,"
         "pressure_brine_high_limit,pressure_brine_alarm_enabled,"
-        "delta_p_alarm_enabled,delta_p_alarm_limit "
+        "delta_p_alarm_enabled,delta_p_alarm_limit,"
+        "flow_protection_enabled,recovery_protection_enabled "
         "FROM device_config WHERE device_id=%s",
         (device_id,)
     )
@@ -3116,6 +3118,8 @@ def get_config(device_id):
         "pressure_brine_alarm_enabled":     r[35],
         "delta_p_alarm_enabled":            r[36],
         "delta_p_alarm_limit":              r[37],
+        "flow_protection_enabled":          r[38] if r[38] is not None else True,
+        "recovery_protection_enabled":      r[39] if r[39] is not None else True,
     })
 
 @api.route("/api/config/<device_id>", methods=["POST"])
@@ -3153,6 +3157,9 @@ def set_config(device_id):
     pb_alarm_en     = bool(data.get("pressure_brine_alarm_enabled", False))
     dp_alarm_en     = bool(data.get("delta_p_alarm_enabled",        False))
     dp_alarm_limit  = float(data.get("delta_p_alarm_limit",         5.0))
+    # ── Flags de habilitación de protecciones activas (CFG_VERSION 2) ─────────
+    flow_prot_en    = bool(data.get("flow_protection_enabled",     True))
+    rec_prot_en     = bool(data.get("recovery_protection_enabled", True))
     db.execute(
         "INSERT INTO device_config "
         "(device_id,pump_power_kw,cost_kwh,cost_water_m3,"
@@ -3168,9 +3175,10 @@ def set_config(device_id):
         "pressure_brine_min_bar,pressure_brine_max_bar,"
         "pressure_brine_high_limit,pressure_brine_alarm_enabled,"
         "delta_p_alarm_enabled,delta_p_alarm_limit,"
+        "flow_protection_enabled,recovery_protection_enabled,"
         "friendly_name,location,updated_at) "
         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-        "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
+        "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW()) "
         "ON CONFLICT (device_id) DO UPDATE SET "
         "pump_power_kw=EXCLUDED.pump_power_kw, cost_kwh=EXCLUDED.cost_kwh, "
         "cost_water_m3=EXCLUDED.cost_water_m3, target_recovery=EXCLUDED.target_recovery, "
@@ -3201,6 +3209,8 @@ def set_config(device_id):
         "pressure_brine_alarm_enabled=EXCLUDED.pressure_brine_alarm_enabled, "
         "delta_p_alarm_enabled=EXCLUDED.delta_p_alarm_enabled, "
         "delta_p_alarm_limit=EXCLUDED.delta_p_alarm_limit, "
+        "flow_protection_enabled=EXCLUDED.flow_protection_enabled, "
+        "recovery_protection_enabled=EXCLUDED.recovery_protection_enabled, "
         "friendly_name=EXCLUDED.friendly_name, location=EXCLUDED.location, updated_at=NOW()",
         (device_id,
          data.get("pump_power_kw", 0.75),     data.get("cost_kwh", 0.12),
@@ -3213,6 +3223,7 @@ def set_config(device_id):
          pm_en, pm_minv, pm_maxv, pm_minb, pm_maxb, pm_lim, pm_hi, p_fdly,
          pb_en, pb_minv, pb_maxv, pb_minb, pb_maxb,
          pb_hi_alarm, pb_alarm_en, dp_alarm_en, dp_alarm_limit,
+         flow_prot_en, rec_prot_en,
          data.get("friendly_name", ""),       data.get("location", "")),
     )
     KPIEngine.invalidate_config(device_id)
@@ -3222,7 +3233,8 @@ def set_config(device_id):
                            tds1_cal_slope, tds1_cal_offset,
                            tds2_cal_slope, tds2_cal_offset,
                            pm_en, pm_minv, pm_maxv, pm_minb, pm_maxb, pm_lim, pm_hi, p_fdly,
-                           pb_en, pb_minv, pb_maxv, pb_minb, pb_maxb)
+                           pb_en, pb_minv, pb_maxv, pb_minb, pb_maxb,
+                           flow_prot_en, rec_prot_en)
     alert_manager.fire_event(
         device_id, "CONFIG_UPDATED",
         f"Config actualizada: ff1={ff1} ff2={ff2} tds_t={tds_t} "
@@ -3247,6 +3259,7 @@ def _publish_device_config(
     pm_lim: bool = False, pm_hi: float = 12.0, p_fdly: int = 3,
     pb_en: bool = False, pb_minv: float = 0.5, pb_maxv: float = 4.5,
     pb_minb: float = 0.0, pb_maxb: float = 14.0,
+    flow_prot_en: bool = True, rec_prot_en: bool = True,
 ):
     """Publish retained sensor config + process protections to the device via MQTT.
 
@@ -3289,6 +3302,8 @@ def _publish_device_config(
         "pressure_brine_max_voltage":       pb_maxv,
         "pressure_brine_min_bar":           pb_minb,
         "pressure_brine_max_bar":           pb_maxb,
+        "flow_protection_enabled":          flow_prot_en,
+        "recovery_protection_enabled":      rec_prot_en,
         "updated_at":               int(_time.time()),
     })
     mqtt_client.publish(f"fyntek/{device_id}/config", payload, retain=True)
@@ -3452,6 +3467,62 @@ def _publish_device_rules(device_id: str, rules: dict):
     })
     mqtt_client.publish(f"fyntek/{device_id}/rules", payload, retain=True)
     log.info(f"[{device_id}] Rules MQTT publicado (retained)")
+
+
+# ============================================================
+# PROCESS CONFIG — parámetros de temporización FSM (ver process_config_catalog.py)
+# ============================================================
+
+@api.route("/api/process_config/<device_id>", methods=["GET"])
+def get_process_config(device_id):
+    rows = db.fetchall(
+        "SELECT process_config FROM devices WHERE device_id=%s",
+        (device_id,)
+    )
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+    stored, = rows[0]
+    cfg, warnings = process_config_catalog.validate_process_config(
+        process_config_catalog.merge_process_config(stored)
+    )
+    return jsonify({
+        "process_config": cfg,
+        "warnings":       warnings,
+        "catalog": {
+            "labels": process_config_catalog.PROCESS_CONFIG_LABELS,
+            "limits": {k: {"min": v[0], "max": v[1]}
+                       for k, v in process_config_catalog.PROCESS_CONFIG_LIMITS.items()},
+        },
+    })
+
+
+@api.route("/api/process_config/<device_id>", methods=["POST"])
+def set_process_config(device_id):
+    rows = db.fetchall("SELECT 1 FROM devices WHERE device_id=%s", (device_id,))
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    cfg, warnings = process_config_catalog.validate_process_config(
+        data.get("process_config") or data
+    )
+
+    db.execute(
+        "UPDATE devices SET process_config=%s WHERE device_id=%s",
+        (json.dumps(cfg), device_id),
+    )
+    _publish_device_process_config(device_id, cfg)
+    return jsonify({"status": "ok", "warnings": warnings})
+
+
+def _publish_device_process_config(device_id: str, cfg: dict):
+    if not mqtt_client:
+        return
+    import json as _json
+    import time as _time
+    payload = _json.dumps({**cfg, "updated_at": int(_time.time())})
+    mqtt_client.publish(f"fyntek/{device_id}/process_config", payload, retain=True)
+    log.info(f"[{device_id}] ProcessConfig MQTT publicado (retained)")
 
 
 # ============================================================
@@ -4367,6 +4438,10 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
       <input type="number" id="tds2-cal-of" step="0.1" min="-500" max="500" placeholder="0">
     </div>
     <div class="cfg-section">Protección de caudal permeado</div>
+    <div class="cfg-field cfg-check">
+      <label>Protección habilitada (FAULT)</label>
+      <input type="checkbox" id="flow-prot-en" checked>
+    </div>
     <div class="cfg-field">
       <label>Caudal mínimo (L/min)</label>
       <input type="number" id="min-flow" step="0.05" min="0" max="50" placeholder="0.2">
@@ -4376,6 +4451,10 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
       <input type="number" id="flow-delay" step="5" min="5" max="300" placeholder="30">
     </div>
     <div class="cfg-section">Protección de recovery</div>
+    <div class="cfg-field cfg-check">
+      <label>Protección habilitada (FAULT)</label>
+      <input type="checkbox" id="rec-prot-en" checked>
+    </div>
     <div class="cfg-field">
       <label>Recovery mínimo (%)</label>
       <input type="number" id="min-rec" step="1" min="1" max="99" placeholder="10">
@@ -4484,7 +4563,7 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
   No cambia el comportamiento actual del equipo — requiere FW ≥ 1.1.5 para sincronizar.</p>
   <div class="cfg-section">Entradas digitales</div>
   <table class="iomap-table">
-    <thead><tr><th>Señal</th><th>GPIO</th><th>Modo</th><th>Invertir</th></tr></thead>
+    <thead><tr><th>Señal</th><th>GPIO</th><th>Modo</th><th>Invertir</th><th>Debounce [s]</th></tr></thead>
     <tbody id="iomap-inputs"></tbody>
   </table>
   <div class="cfg-section">Salidas digitales</div>
@@ -4782,8 +4861,10 @@ async function loadConfig(){
     document.getElementById('tds1-cal-of').value = c.tds1_cal_offset        ?? '';
     document.getElementById('tds2-cal-sl').value = c.tds2_cal_slope         ?? '';
     document.getElementById('tds2-cal-of').value = c.tds2_cal_offset        ?? '';
+    document.getElementById('flow-prot-en').checked = c.flow_protection_enabled !== false;
     document.getElementById('min-flow').value  = c.min_flow_lpm             ?? '';
     document.getElementById('flow-delay').value= c.flow_fault_delay_sec     ?? '';
+    document.getElementById('rec-prot-en').checked  = c.recovery_protection_enabled !== false;
     document.getElementById('min-rec').value   = c.min_recovery_pct         ?? '';
     document.getElementById('max-rec').value   = c.max_recovery_pct         ?? '';
     document.getElementById('rec-delay').value = c.recovery_fault_delay_sec ?? '';
@@ -4821,8 +4902,10 @@ async function saveConfig(){
     tds1_cal_offset:          parseFloat(document.getElementById('tds1-cal-of').value) || 0,
     tds2_cal_slope:           parseFloat(document.getElementById('tds2-cal-sl').value) || 0,
     tds2_cal_offset:          parseFloat(document.getElementById('tds2-cal-of').value) || 0,
+    flow_protection_enabled:  document.getElementById('flow-prot-en').checked,
     min_flow_lpm:             parseFloat(document.getElementById('min-flow').value)   || 0.2,
     flow_fault_delay_sec:     parseInt(document.getElementById('flow-delay').value)   || 30,
+    recovery_protection_enabled: document.getElementById('rec-prot-en').checked,
     min_recovery_pct:         parseFloat(document.getElementById('min-rec').value)    || 10,
     max_recovery_pct:         parseFloat(document.getElementById('max-rec').value)    || 85,
     recovery_fault_delay_sec: parseInt(document.getElementById('rec-delay').value)    || 60,
@@ -4881,6 +4964,17 @@ function gpioOptionsHtml(selected){
   return html;
 }
 
+// Para salidas: solo R1-R6 (los relés disponibles en la placa).
+// Los valores siguen siendo GPIOs numéricos — la UI solo simplifica la selección.
+const RELAY_GPIO = {R1:4, R2:16, R3:17, R4:18, R5:19, R6:2};
+function relayOptionsHtml(selected){
+  let html = '<option value=""'+(selected==null?' selected':'')+'>— sin asignar —</option>';
+  for(const [name, gpio] of Object.entries(RELAY_GPIO)){
+    html += '<option value="'+gpio+'"'+(selected===gpio?' selected':'')+'>'+name+'</option>';
+  }
+  return html;
+}
+
 async function loadIomap(){
   try {
     const r = await fetch('/api/iomap/'+dev());
@@ -4900,7 +4994,8 @@ async function loadIomap(){
           '<option value="pullup"'+(e.mode==='pulldown'?'':' selected')+'>Pull-up</option>'+
           '<option value="pulldown"'+(e.mode==='pulldown'?' selected':'')+'>Pull-down</option>'+
         '</select></td>'+
-        '<td class="iomap-chk"><input type="checkbox" id="io-in-'+sig+'-inv"'+(e.invert?' checked':'')+'></td>';
+        '<td class="iomap-chk"><input type="checkbox" id="io-in-'+sig+'-inv"'+(e.invert?' checked':'')+'></td>'+
+        '<td><input type="number" id="io-in-'+sig+'-deb" min="0" max="60" step="0.1" style="width:4.5rem;text-align:right" value="'+((e.debounce_ms||0)/1000)+'"></td>';
       inBody.appendChild(tr);
     }
 
@@ -4911,7 +5006,7 @@ async function loadIomap(){
       const tr = document.createElement('tr');
       tr.innerHTML =
         '<td>'+(c.catalog.output_labels[sig]||sig)+'</td>'+
-        '<td><select id="io-out-'+sig+'-gpio">'+gpioOptionsHtml(e.gpio)+'</select></td>'+
+        '<td><select id="io-out-'+sig+'-gpio">'+relayOptionsHtml(e.gpio)+'</select></td>'+
         '<td class="iomap-chk"><input type="checkbox" id="io-out-'+sig+'-inv"'+(e.invert?' checked':'')+'></td>';
       outBody.appendChild(tr);
     }
@@ -4937,10 +5032,12 @@ async function saveIomap(){
   const io_map = {inputs:{}, outputs:{}};
   for(const sig of IOMAP_CATALOG.inputs){
     const g = document.getElementById('io-in-'+sig+'-gpio').value;
+    const deb = document.getElementById('io-in-'+sig+'-deb').value;
     io_map.inputs[sig] = {
-      gpio:   g===''? null : parseInt(g),
-      mode:   document.getElementById('io-in-'+sig+'-mode').value,
-      invert: document.getElementById('io-in-'+sig+'-inv').checked ? 1 : 0,
+      gpio:        g===''? null : parseInt(g),
+      mode:        document.getElementById('io-in-'+sig+'-mode').value,
+      invert:      document.getElementById('io-in-'+sig+'-inv').checked ? 1 : 0,
+      debounce_ms: Math.round((parseFloat(deb)||0)*1000),
     };
   }
   for(const sig of IOMAP_CATALOG.outputs){
@@ -5287,6 +5384,11 @@ def main():
     db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS features JSONB DEFAULT '{}'::jsonb")
     # Motor de reglas — process_permits[]/independent_outputs[]/fault_rules[] (ver rule_catalog.py)
     db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS rules    JSONB DEFAULT '{}'::jsonb")
+    # Protecciones de flujo/recovery habilitables (CFG_VERSION 2, ver firmware sensors.h)
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS flow_protection_enabled     BOOLEAN DEFAULT TRUE")
+    db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS recovery_protection_enabled BOOLEAN DEFAULT TRUE")
+    # Parámetros de temporización FSM configurables (ver process_config_catalog.py)
+    db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS process_config JSONB DEFAULT '{}'::jsonb")
     log.info("✅ Schema migrations aplicadas")
 
     # Pre-populate tracker from DB so panels show correct state after restart

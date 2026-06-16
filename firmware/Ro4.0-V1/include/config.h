@@ -84,7 +84,7 @@
 // discarded and safe defaults are used.  Bump CFG_VERSION whenever the
 // SensorConfig layout or semantics change to auto-invalidate stale NVS data.
 #define CFG_MAGIC    0x4B524F58U   // 'K','R','O','X' — identifies KAIROX config block
-#define CFG_VERSION  1U            // increment on struct layout changes
+#define CFG_VERSION  2U            // v2: +flow_protection_enabled, +recovery_protection_enabled
 
 // ── NVS io_map integrity ──────────────────────────────────────────────────────
 // IOMAP_MAGIC/IOMAP_VERSION cubren el blob del mapeo Pin<->Señal lógica en NVS
@@ -92,10 +92,36 @@
 // CFG_VERSION: si no coinciden, se descarta lo guardado y se usa el mapeo por
 // defecto (reproduce el wiring actual D1-D6/R1-R6, ver defaultIOMap()).
 #define IOMAP_MAGIC   0x4B584D41U  // 'K','X','M','A' — identifica el blob io_map
-#define IOMAP_VERSION 2U           // v2: LogicalInput::COUNT 12->15 (permeate_tank_demand,
+#define IOMAP_VERSION 3U           // v2: LogicalInput::COUNT 12->15 (permeate_tank_demand,
                                     // final_tank_demand, phase_failure) cambia sizeof(IOMapConfig).
-                                    // Bump fuerza fallback a defaultIOMap() en equipos con NVS v1,
-                                    // con log explícito (en vez de fallo silencioso por tamaño).
+                                    // v3: IOPinConfig += default_value/debounce_ms (desacople
+                                    // IO/FSM — Sensors::getSignal() reemplaza demanda()/
+                                    // crudoDisponible()/presionOK()). Bump fuerza fallback a
+                                    // defaultIOMap() en equipos con NVS v1/v2, con log explícito
+                                    // (en vez de fallo silencioso por tamaño). Equipos con io_map
+                                    // custom (ej. lab1/Chamico) requieren re-importar el perfil
+                                    // tras actualizar.
+
+// ── NVS process config integrity ─────────────────────────────────────────────
+// PROCCFG_MAGIC/PROCCFG_VERSION cubren el blob de parámetros de temporización
+// de la FSM (antes hardcodeados en config.h como #define) en NVS namespace
+// "kx_proccfg" (ver src/control/process_config.h). Defaults = valores exactos
+// que tenían los #define originales → sin cambio de comportamiento en equipos
+// sin process_config MQTT configurado.
+#define PROCCFG_MAGIC   0x4B585043U   // 'K','X','P','C'
+#define PROCCFG_VERSION 1U
+#define PROCCFG_PRESSURE_STABILIZATION_DELAY_SEC_DEFAULT  10U  // LOW_PUMP_FILL_TIME/1000
+#define PROCCFG_STARTUP_TIMEOUT_SEC_DEFAULT                5U  // PRESSURE_CHECK_TIME/1000
+#define PROCCFG_RETRY_INTERVAL_SEC_DEFAULT                10U  // RETRY_DELAY/1000
+#define PROCCFG_MAX_RETRIES_DEFAULT                        5U  // FSM_MAX_RETRIES
+#define PROCCFG_FLUSH_DURATION_SEC_DEFAULT                60U  // FLUSH_TDS_TIME/1000
+
+// ── Flags de habilitación de protecciones activas (CFG_VERSION 2) ─────────────
+// Default = 1 porque son protecciones YA ACTIVAS en firmware anterior. Defaultear
+// a 0 las desactivaría silenciosamente en todos los equipos tras actualizar.
+// Contraste: pressure_membrane_limits_enabled default=0 (nueva feature, opt-in).
+#define FLOW_PROTECTION_ENABLED_DEFAULT       1U
+#define RECOVERY_PROTECTION_ENABLED_DEFAULT   1U
 
 // ── NVS rules integrity ───────────────────────────────────────────────────────
 // RULES_MAGIC/RULES_VERSION cubren el blob del motor de reglas (process_permits/

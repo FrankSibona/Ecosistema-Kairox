@@ -1,12 +1,13 @@
 {
   "io_map": {
     "inputs": {
-      "permeate_tank_demand":   {"gpio": 5,  "mode": "pullup", "invert": 0},
-      "final_tank_demand":      {"gpio": 15, "mode": "pullup", "invert": 0},
-      "phase_failure":          {"gpio": 21, "mode": "pullup", "invert": 0},
-      "permeate_tank_low":      {"gpio": 22, "mode": "pullup", "invert": 0},
-      "softener_regenerating":  {"gpio": 23, "mode": "pullup", "invert": 0},
-      "pressure_ok":            {"gpio": 33, "mode": "pulldown", "invert": 0}
+      "permeate_tank_demand":   {"gpio": 27, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "pressure_ok":            {"gpio": 26, "mode": "pullup",   "invert": 0, "default_value": 1, "debounce_ms": 2000},
+      "softener_regenerating":  {"gpio": 25, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "permeate_tank_low":      {"gpio": 33, "mode": "pulldown", "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "final_tank_demand":      {"gpio": 32, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "phase_failure":          {"gpio": 23, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
+      "raw_water_available":    {"gpio": null, "mode": "pullup", "invert": 0, "default_value": 1, "debounce_ms": 0}
     },
     "outputs": {
       "transfer_pump": {"gpio": 12, "invert": 0}

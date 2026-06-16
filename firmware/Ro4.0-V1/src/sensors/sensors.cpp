@@ -372,13 +372,17 @@ void Sensors::begin() {
 // ── Update (called every loop iteration) ─────────────────────────────────────
 void Sensors::update() {
 
-    // ── Digital inputs ────────────────────────────────────────────────────────
+    // ── Digital inputs (telemetría/diagnóstico — contrato MQTT, sin cambios) ───
     d1 = digitalRead(PIN_D1);
     d2 = digitalRead(PIN_D2);
     d3 = digitalRead(PIN_D3);
     d4 = digitalRead(PIN_D4);
     d5 = digitalRead(PIN_D5);
     d6 = digitalRead(PIN_D6);
+
+    // ── Señales lógicas desacopladas (io_map + debounce) — consumidas por la
+    // FSM y el motor de reglas vía getSignal() ─────────────────────────────────
+    updateSignals();
 
     // ── Flow (~1 Hz window) ───────────────────────────────────────────────────
     // Pulses accumulated by ISR since lastFlowTime.
@@ -517,19 +521,52 @@ bool Sensors::getD4() { return d4; }
 bool Sensors::getD5() { return d5; }
 bool Sensors::getD6() { return d6; }
 
-bool Sensors::getDemand()        { return d1; }
-bool Sensors::getCrudoOK()       { return d2; }
-bool Sensors::getDoseOK()        { return d3; }
-bool Sensors::getPresostato()    { return d4; }
-bool Sensors::getNivelBajoPozo() { return d5; }
+// ── Señales lógicas desacopladas (io_map) ────────────────────────────────────
+// Resuelve GPIO/modo/invert/default_value para cada LogicalInput y aplica un
+// debounce simétrico configurable (debounce_ms, por canal). Llamada 1x/loop
+// desde update() — getSignal() solo lee el valor ya estabilizado (_sigStable).
+//
+// gpio==IOMAP_GPIO_NONE -> _sigStable = default_value directo, sin debounce
+//                          (no hay "raw" físico que estabilizar; evita que un
+//                          default_value=1 tarde debounce_ms en reflejarse al
+//                          arrancar — "sin sensor = se asume OK" debe ser
+//                          inmediato).
+// debounce_ms==0        -> _sigStable sigue a raw sin retardo.
+// debounce_ms>0         -> _sigStable solo cambia tras sostener el nuevo raw
+//                          durante >= debounce_ms (simétrico: aplica igual a
+//                          flancos 0->1 y 1->0).
+void Sensors::updateSignals() {
+    const IOMapConfig& m = ioMapGet();
+    unsigned long now = millis();
 
-bool Sensors::demanda()          { return d1; }
-bool Sensors::crudoDisponible()  { return d2; }
-bool Sensors::presionOK()        { return d4; }
+    for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
+        const IOPinConfig& e = m.inputs[i];
 
-bool Sensors::readSignal(LogicalInput sig) const {
-    const IOPinConfig& e = ioMapGet().inputs[(uint8_t)sig];
-    if (e.gpio == IOMAP_GPIO_NONE) return false;
-    bool raw = digitalRead(e.gpio);
-    return e.invert ? !raw : raw;
+        if (e.gpio == IOMAP_GPIO_NONE) {
+            _sigStable[i] = e.default_value;
+            _sigRaw[i] = e.default_value;
+            continue;
+        }
+
+        bool pin = digitalRead(e.gpio);
+        bool raw = e.invert ? !pin : pin;
+
+        if (e.debounce_ms == 0) {
+            _sigStable[i] = raw;
+            _sigRaw[i] = raw;
+            continue;
+        }
+
+        if (raw != _sigRaw[i]) {
+            _sigRaw[i] = raw;
+            _sigEdgeStart[i] = now;
+        }
+        if (now - _sigEdgeStart[i] >= e.debounce_ms) {
+            _sigStable[i] = raw;
+        }
+    }
+}
+
+bool Sensors::getSignal(LogicalInput sig) const {
+    return _sigStable[(uint8_t)sig];
 }

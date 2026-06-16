@@ -8,6 +8,7 @@
 #include "safety/watchdog.h"
 #include "io/io_map.h"
 #include "rules/rules.h"
+#include "control/process_config.h"
 
 Sensors       sensors;
 Control       control;
@@ -23,10 +24,11 @@ void setup() {
     watchdogInit();
 
     sensors.begin();
-    control.begin();
-    ioMapInit();          // carga mapeo Pin<->Señal desde NVS — sin efectos sobre GPIO
-    ioMapApplyPinModes(); // aplica pinMode() según io_map (idempotente para D1-D6/R1-R6)
-    rulesInit();          // carga motor de reglas desde NVS (process_permits/independent_outputs/fault_rules)
+    ioMapInit();          // carga io_map ANTES de control.begin() — setOutputs() usa ioMapGet()
+    ioMapApplyPinModes(); // aplica pinMode() para todos los outputs/inputs del io_map
+    rulesInit();          // carga motor de reglas desde NVS
+    processConfigInit();  // carga parámetros de temporización FSM desde NVS
+    control.begin();      // stopAll() → setOutputs() → ioMapGet() ya disponible
     commands.begin();
     comms.begin(commands, sensors, diagMode, flightRec);
 
@@ -42,7 +44,7 @@ void loop() {
     // para derivadas, por diseño: ro_producing refleja el estado previo).
     bool ruleInputs[(uint8_t)LogicalInput::COUNT];
     for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
-        ruleInputs[i] = sensors.readSignal((LogicalInput)i);
+        ruleInputs[i] = sensors.getSignal((LogicalInput)i);
     }
     bool ruleDerived[(uint8_t)DerivedSignal::COUNT];
     computeDerivedSignals(ruleDerived, control);

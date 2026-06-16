@@ -1,16 +1,13 @@
 #include "control.h"
+#include "process_config.h"
 #include <config.h>
 #include <string.h>
 
 // ================= SETUP =================
 void Control::begin() {
-    pinMode(PIN_R1, OUTPUT);
-    pinMode(PIN_R2, OUTPUT);
-    pinMode(PIN_R3, OUTPUT);
-    pinMode(PIN_R5, OUTPUT);
-    pinMode(PIN_R6, OUTPUT);
-
-    digitalWrite(PIN_R3, LOW);
+    // Pin modes para outputs son aplicados por ioMapApplyPinModes() en setup()
+    // antes de llamar a begin() — ver main.cpp. stopAll() usa setOutputs() →
+    // ioMapGet() que ya está disponible.
     stopAll();
 }
 
@@ -86,20 +83,23 @@ void Control::logStateChange(SystemState from, SystemState to) {
 // ================= OUTPUTS =================
 
 void Control::setOutputs(bool pumpLow, bool pumpHigh, bool flush, bool inlet) {
-
-    outputs.pumpLow = pumpLow;
-    outputs.pumpHigh = pumpHigh;
+    outputs.pumpLow    = pumpLow;
+    outputs.pumpHigh   = pumpHigh;
     outputs.valveFlush = flush;
     outputs.valveInlet = inlet;
+    outputs.pumpInlet  = false;
+    outputs.pumpDose   = false;
 
-    // no usados aún
-    outputs.pumpInlet = false;
-    outputs.pumpDose = false;
+    const IOMapConfig& m = ioMapGet();
+    const IOPinConfig& p1 = m.outputs[(uint8_t)LogicalOutput::LOW_PRESSURE_PUMP];
+    const IOPinConfig& p2 = m.outputs[(uint8_t)LogicalOutput::HIGH_PRESSURE_PUMP];
+    const IOPinConfig& p5 = m.outputs[(uint8_t)LogicalOutput::FLUSH_VALVE];
+    const IOPinConfig& p6 = m.outputs[(uint8_t)LogicalOutput::INLET_VALVE];
 
-    digitalWrite(PIN_R1, pumpLow);
-    digitalWrite(PIN_R2, pumpHigh);
-    digitalWrite(PIN_R5, flush);
-    digitalWrite(PIN_R6, inlet);
+    if (p1.gpio != IOMAP_GPIO_NONE) digitalWrite(p1.gpio, p1.invert ? !pumpLow  : (int)pumpLow);
+    if (p2.gpio != IOMAP_GPIO_NONE) digitalWrite(p2.gpio, p2.invert ? !pumpHigh : (int)pumpHigh);
+    if (p5.gpio != IOMAP_GPIO_NONE) digitalWrite(p5.gpio, p5.invert ? !flush    : (int)flush);
+    if (p6.gpio != IOMAP_GPIO_NONE) digitalWrite(p6.gpio, p6.invert ? !inlet    : (int)inlet);
 }
 
 void Control::startLow() {
@@ -144,22 +144,13 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
         }
     }
 
-    // ===== Persistencia =====
-    if (s.demanda()) {
-        if (demandaStart == 0) demandaStart = millis();
-    } else demandaStart = 0;
-
-    if (s.crudoDisponible()) {
-        if (crudoStart == 0) crudoStart = millis();
-    } else crudoStart = 0;
-
-    if (s.presionOK()) {
-        if (presionStart == 0) presionStart = millis();
-    } else presionStart = 0;
-
-    bool demandaOK = demandaStart && (millis() - demandaStart > 2000);
-    bool crudoOK   = crudoStart   && (millis() - crudoStart > 2000);
-    bool presionOK = presionStart && (millis() - presionStart > 2000);
+    // ===== Señales de gate de la FSM ─────────────────────────────────────────
+    // demand/raw_water_available/pressure_ok: debounce simétrico aplicado en
+    // Sensors::getSignal() (io_map.debounce_ms, default 2000ms — reproduce el
+    // debounce hoy hardcodeado, ver IOMAP_VERSION v3 en config.h).
+    bool demandaOK = ruleInputs[(uint8_t)LogicalInput::DEMAND];
+    bool crudoOK   = ruleInputs[(uint8_t)LogicalInput::RAW_WATER_AVAILABLE];
+    bool presionOK = ruleInputs[(uint8_t)LogicalInput::PRESSURE_OK];
 
     if (state != lastState) {
         logStateChange(lastState, state);
@@ -172,7 +163,8 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
             stopAll();
 
             if (demandaOK && crudoOK) {
-                bool retryWaiting = retryCount > 0 && (millis() - retryTimer < RETRY_DELAY);
+                const ProcessConfig& pc = processConfigGet();
+                bool retryWaiting = retryCount > 0 && (millis() - retryTimer < pc.retry_interval_sec * 1000UL);
                 if (!retryWaiting) {
                     Serial.println("[EVENT] Demanda detectada -> arranque");
                     state = STARTING;
@@ -192,23 +184,25 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
                 break;
             }
 
-            if (millis() - stateStartTime > LOW_PUMP_FILL_TIME) {
-                startHigh();
-            }
+            {
+                const ProcessConfig& pc = processConfigGet();
+                if (millis() - stateStartTime > pc.pressure_stabilization_delay_sec * 1000UL) {
+                    startHigh();
+                }
 
-            if (millis() - stateStartTime > PRESSURE_CHECK_TIME) {
-
-                if (presionOK) {
-                    Serial.println("[EVENT] Presión OK");
-                    retryCount = 0;
-                    state = PRODUCING;
-                } else {
-                    retryCount++;
-                    Serial.println("[FAULT] Presión no alcanzada");
-                    pMembraneHighArmed = false;
-                    for (uint8_t i = 0; i < FAULT_RULES_MAX; i++) faultRuleArmed[i] = false;
-                    state = IDLE;
-                    retryTimer = millis();
+                if (millis() - stateStartTime > pc.startup_timeout_sec * 1000UL) {
+                    if (presionOK) {
+                        Serial.println("[EVENT] Presión OK");
+                        retryCount = 0;
+                        state = PRODUCING;
+                    } else {
+                        retryCount++;
+                        Serial.println("[FAULT] Presión no alcanzada");
+                        pMembraneHighArmed = false;
+                        for (uint8_t i = 0; i < FAULT_RULES_MAX; i++) faultRuleArmed[i] = false;
+                        state = IDLE;
+                        retryTimer = millis();
+                    }
                 }
             }
 
@@ -232,17 +226,13 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
             }
 
             // process_permits["ro"] — condiciones EXTERNAS de operación (demanda,
-            // interlocks, niveles). RAW_WATER_AVAILABLE usa el valor debounced de la
-            // FSM (compat con default = AND(raw_water_available)); el resto (incl.
-            // señales nuevas Chamico) usa ruleInputs[] crudo (io_map). pressure_ok NO
-            // participa del permit — sigue siendo condición interna de la FSM
-            // (presionOK, abajo).
+            // interlocks, niveles). ruleInputs[] ya contiene las señales
+            // estabilizadas por Sensors::getSignal() (io_map: debounce +
+            // default_value), incluido RAW_WATER_AVAILABLE (compat con default =
+            // AND(raw_water_available)). pressure_ok NO participa del permit —
+            // sigue siendo condición interna de la FSM (presionOK, abajo).
             {
-                bool permitInputs[(uint8_t)LogicalInput::COUNT];
-                memcpy(permitInputs, ruleInputs, sizeof(permitInputs));
-                permitInputs[(uint8_t)LogicalInput::RAW_WATER_AVAILABLE] = crudoOK;
-
-                bool permitOk = evalRule(rulesGet().process_permits[(uint8_t)ProcessId::RO], permitInputs, ruleDerived);
+                bool permitOk = evalRule(rulesGet().process_permits[(uint8_t)ProcessId::RO], ruleInputs, ruleDerived);
 
                 if (!permitOk || !presionOK) {
                     Serial.println("[FAULT] Pérdida condición");
@@ -262,72 +252,16 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
             if (checkFaultRules(ruleInputs, ruleDerived)) break;
 
             // ── Protección de caudal de permeado ─────────────────────────────
-            {
-                const SensorConfig& cfg = s.getConfig();
-                float flowP = s.getFlow1();
-                unsigned long delayMs = (unsigned long)cfg.flow_fault_delay_sec * 1000UL;
-
-                if (flowP < cfg.min_flow_lpm) {
-                    if (!flowFaultArmed) {
-                        flowFaultTimer = millis();
-                        flowFaultArmed = true;
-                    } else if (millis() - flowFaultTimer >= delayMs) {
-                        Serial.printf("[FAULT] FLOW_LOW: %.2f L/min < %.2f L/min (umbral)\n",
-                                      flowP, cfg.min_flow_lpm);
-                        faultReason    = FaultReason::FLOW_LOW;
-                        flowFaultArmed = false;
-                        state          = FAULT;
-                        break;
-                    }
-                } else {
-                    flowFaultArmed = false;
-                }
-            }
+            if (checkFlowProtection(s)) break;
 
             // ── Protección de recovery ────────────────────────────────────────
-            {
-                const SensorConfig& cfg = s.getConfig();
-                float flowP = s.getFlow1();
-                float flowR = s.getFlow2();
-                float total = flowP + flowR;
-
-                if (total > 0.1f) {
-                    float recoveryPct = (flowP / total) * 100.0f;
-                    bool outOfRange = (recoveryPct < cfg.min_recovery_pct) ||
-                                      (recoveryPct > cfg.max_recovery_pct);
-                    unsigned long delayMs = (unsigned long)cfg.recovery_fault_delay_sec * 1000UL;
-
-                    if (outOfRange) {
-                        if (!recoveryFaultArmed) {
-                            recoveryFaultTimer = millis();
-                            recoveryFaultArmed = true;
-                        } else if (millis() - recoveryFaultTimer >= delayMs) {
-                            if (recoveryPct < cfg.min_recovery_pct) {
-                                Serial.printf("[FAULT] RECOVERY_LOW: %.1f%% < %.1f%% (umbral)\n",
-                                              recoveryPct, cfg.min_recovery_pct);
-                                faultReason = FaultReason::RECOVERY_LOW;
-                            } else {
-                                Serial.printf("[FAULT] RECOVERY_HIGH: %.1f%% > %.1f%% (umbral)\n",
-                                              recoveryPct, cfg.max_recovery_pct);
-                                faultReason = FaultReason::RECOVERY_HIGH;
-                            }
-                            recoveryFaultArmed = false;
-                            state = FAULT;
-                            break;
-                        }
-                    } else {
-                        recoveryFaultArmed = false;
-                    }
-                } else {
-                    recoveryFaultArmed = false;  // sin flujo medible — no evaluar
-                }
-            }
+            if (checkRecoveryProtection(s)) break;
             break;
 
         case FLUSHING:
             flushOn();
 
-            if (millis() - stateStartTime > FLUSH_TDS_TIME) {
+            if (millis() - stateStartTime > processConfigGet().flush_duration_sec * 1000UL) {
                 Serial.println("[EVENT] Fin flushing");
                 state = IDLE;
             }
@@ -342,7 +276,7 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
             break;
     }
 
-    if (retryCount >= FSM_MAX_RETRIES && state != FAULT) {
+    if (retryCount >= (int)processConfigGet().max_retries && state != FAULT) {
         faultReason = FaultReason::MAX_RETRIES;
         state = FAULT;
     }
@@ -353,10 +287,14 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
         indOut[i] = evalRule(rulesGet().independent_outputs[i], ruleInputs, ruleDerived);
     }
 
-    // well_pump — reemplaza el control directo D5->R3. Default reproduce EXACTO
-    // el comportamiento actual: independent_outputs["well_pump"] = OR(well_low_level).
+    // well_pump — controlado por independent_outputs["well_pump"] (io_map).
     outputs.pumpInlet = indOut[(uint8_t)LogicalOutput::WELL_PUMP];
-    digitalWrite(PIN_R3, outputs.pumpInlet);
+    {
+        const IOPinConfig& p3 = ioMapGet().outputs[(uint8_t)LogicalOutput::WELL_PUMP];
+        if (p3.gpio != IOMAP_GPIO_NONE) {
+            digitalWrite(p3.gpio, p3.invert ? !outputs.pumpInlet : (int)outputs.pumpInlet);
+        }
+    }
 
     // transfer_pump — sin PIN_R* fijo; usa el GPIO de io_map si está asignado
     // (Chamico/lab). Sin asignar -> sin efecto (no se llama digitalWrite).
@@ -429,6 +367,78 @@ bool Control::checkFaultRules(const bool* ruleInputs, const bool* ruleDerived) {
         } else {
             faultRuleArmed[i] = false;
         }
+    }
+    return false;
+}
+
+// ================= FLOW / RECOVERY PROTECTIONS =================
+
+// Respeta flow_protection_enabled — si 0, desarma el timer y retorna false
+// (misma semántica que checkMembraneHighPressure con *_limits_enabled=0).
+bool Control::checkFlowProtection(Sensors& s) {
+    const SensorConfig& cfg = s.getConfig();
+    if (!cfg.flow_protection_enabled) {
+        flowFaultArmed = false;
+        return false;
+    }
+    float flowP = s.getFlow1();
+    unsigned long delayMs = (unsigned long)cfg.flow_fault_delay_sec * 1000UL;
+    if (flowP < cfg.min_flow_lpm) {
+        if (!flowFaultArmed) {
+            flowFaultTimer = millis();
+            flowFaultArmed = true;
+        } else if (millis() - flowFaultTimer >= delayMs) {
+            Serial.printf("[FAULT] FLOW_LOW: %.2f L/min < %.2f L/min (umbral)\n",
+                          flowP, cfg.min_flow_lpm);
+            faultReason    = FaultReason::FLOW_LOW;
+            flowFaultArmed = false;
+            state          = FAULT;
+            return true;
+        }
+    } else {
+        flowFaultArmed = false;
+    }
+    return false;
+}
+
+// Respeta recovery_protection_enabled — si 0, desarma el timer y retorna false.
+bool Control::checkRecoveryProtection(Sensors& s) {
+    const SensorConfig& cfg = s.getConfig();
+    if (!cfg.recovery_protection_enabled) {
+        recoveryFaultArmed = false;
+        return false;
+    }
+    float flowP = s.getFlow1();
+    float flowR = s.getFlow2();
+    float total = flowP + flowR;
+    if (total > 0.1f) {
+        float recoveryPct = (flowP / total) * 100.0f;
+        bool outOfRange = (recoveryPct < cfg.min_recovery_pct) ||
+                          (recoveryPct > cfg.max_recovery_pct);
+        unsigned long delayMs = (unsigned long)cfg.recovery_fault_delay_sec * 1000UL;
+        if (outOfRange) {
+            if (!recoveryFaultArmed) {
+                recoveryFaultTimer = millis();
+                recoveryFaultArmed = true;
+            } else if (millis() - recoveryFaultTimer >= delayMs) {
+                if (recoveryPct < cfg.min_recovery_pct) {
+                    Serial.printf("[FAULT] RECOVERY_LOW: %.1f%% < %.1f%% (umbral)\n",
+                                  recoveryPct, cfg.min_recovery_pct);
+                    faultReason = FaultReason::RECOVERY_LOW;
+                } else {
+                    Serial.printf("[FAULT] RECOVERY_HIGH: %.1f%% > %.1f%% (umbral)\n",
+                                  recoveryPct, cfg.max_recovery_pct);
+                    faultReason = FaultReason::RECOVERY_HIGH;
+                }
+                recoveryFaultArmed = false;
+                state = FAULT;
+                return true;
+            }
+        } else {
+            recoveryFaultArmed = false;
+        }
+    } else {
+        recoveryFaultArmed = false;
     }
     return false;
 }
