@@ -7,7 +7,7 @@
       "softener_regenerating": {"gpio": 25,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
       "permeate_tank_low":     {"gpio": 33,   "mode": "pulldown", "invert": 0, "default_value": 0, "debounce_ms": 0},
       "final_tank_demand":     {"gpio": 32,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
-      "phase_failure":         {"gpio": 23,   "mode": "pullup",   "invert": 1, "default_value": 0, "debounce_ms": 0},
+      "phase_failure":         {"gpio": 23,   "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
       "dosing_ok":             {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
       "feed_tank_high":        {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
       "feed_tank_low":         {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0},
@@ -18,7 +18,13 @@
       "well_low_level":        {"gpio": null, "mode": "pullup",   "invert": 0, "default_value": 0, "debounce_ms": 0}
     },
     "outputs": {
-      "transfer_pump": {"gpio": 12, "invert": 0}
+      "well_pump":          {"gpio": 4,    "invert": 0},
+      "high_pressure_pump": {"gpio": 16,   "invert": 0},
+      "transfer_pump":      {"gpio": 17,   "invert": 0},
+      "flush_valve":        {"gpio": 18,   "invert": 0},
+      "low_pressure_pump":  {"gpio": null, "invert": 0},
+      "inlet_valve":        {"gpio": null, "invert": 0},
+      "dosing_pump":        {"gpio": null, "invert": 0}
     }
   },
   "features": {
