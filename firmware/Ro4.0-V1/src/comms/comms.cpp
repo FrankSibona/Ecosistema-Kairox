@@ -397,13 +397,11 @@ String getDeviceID() {
 // y recuperables sin consultar al equipo (ej. ESP32_ECBA88C92DF4 -> SSID
 // "FYNTEK_2DF4", password "kairox88c92df4").
 String fallbackPortalSSID() {
-    return "FYNTEK_" + device_id.substring(device_id.length() - 4);
+    return "FYNTEK_" + device_id.substring(device_id.length() - 6);
 }
 
 String fallbackPortalPassword() {
-    String pass = "kairox" + device_id.substring(device_id.length() - 8);
-    pass.toLowerCase();
-    return pass;
+    return "kairox2026";
 }
 
 // ================= HELPERS =================
