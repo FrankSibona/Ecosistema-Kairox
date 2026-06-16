@@ -2102,6 +2102,19 @@ class MessageProcessor:
         "reserva2":      "spare2",
     }
 
+    # v2 column order mirrors LogicalInput / LogicalOutput enum in io_catalog.h.
+    # Append-only — never reorder (must match enum index order).
+    _INPUT_V2_COLUMNS = (
+        "demand", "raw_water_available", "feed_tank_high", "feed_tank_low",
+        "permeate_tank_high", "permeate_tank_low", "final_tank_high", "final_tank_low",
+        "pressure_ok", "softener_regenerating", "well_low_level", "dosing_ok",
+        "permeate_tank_demand", "final_tank_demand", "phase_failure",
+    )
+    _OUTPUT_V2_COLUMNS = (
+        "low_pressure_pump", "high_pressure_pump", "well_pump", "transfer_pump",
+        "flush_valve", "inlet_valve", "dosing_pump",
+    )
+
     @staticmethod
     def _is_fw_v2(fw_version: str) -> bool:
         """True for firmware >= 2.0.0 (semantic /inputs and /outputs)."""
@@ -2178,12 +2191,16 @@ class MessageProcessor:
 
     def _handle_inputs(self, device_id, timestamp, data):
         if self._is_fw_v2(data.get("fw_version", "")):
-            # v2: logical signal names, only configured signals present.
-            # DB schema not yet migrated — update tracker only for validation.
             signals = {k: validate_bool(v)
                        for k, v in data.items()
                        if k not in ("device_id", "ts", "fw_version")}
-            log.debug(f"[{device_id}] /inputs v2: {signals}")
+            cols = self._INPUT_V2_COLUMNS
+            vals = tuple(signals.get(c) for c in cols)
+            db.execute(
+                f"INSERT INTO telemetry_inputs (time, device_id, {', '.join(cols)}) "
+                f"VALUES (%s, %s, {', '.join(['%s'] * len(cols))})",
+                (timestamp, device_id) + vals,
+            )
             tracker.update_inputs(device_id, signals)
             return
         # v1: legacy hardcoded pin names
@@ -2200,12 +2217,16 @@ class MessageProcessor:
 
     def _handle_outputs(self, device_id, timestamp, data):
         if self._is_fw_v2(data.get("fw_version", "")):
-            # v2: logical output names, only configured signals present.
-            # DB schema not yet migrated — update tracker only for validation.
             signals = {k: validate_bool(v)
                        for k, v in data.items()
                        if k not in ("device_id", "ts", "fw_version")}
-            log.debug(f"[{device_id}] /outputs v2: {signals}")
+            cols = self._OUTPUT_V2_COLUMNS
+            vals = tuple(signals.get(c) for c in cols)
+            db.execute(
+                f"INSERT INTO telemetry_outputs (time, device_id, {', '.join(cols)}) "
+                f"VALUES (%s, %s, {', '.join(['%s'] * len(cols))})",
+                (timestamp, device_id) + vals,
+            )
             tracker.update_outputs(device_id, signals)
             return
         # v1: legacy hardcoded relay names

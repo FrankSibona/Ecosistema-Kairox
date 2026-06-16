@@ -50,27 +50,52 @@ CREATE INDEX IF NOT EXISTS idx_state_device_time
     ON telemetry_state (device_id, time DESC);
 
 CREATE TABLE IF NOT EXISTS telemetry_inputs (
-    time        TIMESTAMPTZ     NOT NULL,
-    device_id   TEXT            NOT NULL,
-    demand      BOOLEAN,
-    raw_water_ok    BOOLEAN,
-    dose_ok     BOOLEAN,
-    pressure_switch  BOOLEAN,
-    feed_tank_level_low    BOOLEAN,
-    spare2    BOOLEAN
+    time                  TIMESTAMPTZ NOT NULL,
+    device_id             TEXT        NOT NULL,
+    -- v1 columns (firmware < 2.0.0) — kept for backward compat, remove after full fleet migration
+    demand                BOOLEAN,
+    raw_water_ok          BOOLEAN,
+    dose_ok               BOOLEAN,
+    pressure_switch       BOOLEAN,
+    feed_tank_level_low   BOOLEAN,
+    spare2                BOOLEAN,
+    -- v2 columns — logical signal names from io_catalog.h (LogicalInput enum order)
+    raw_water_available   BOOLEAN,
+    feed_tank_high        BOOLEAN,
+    feed_tank_low         BOOLEAN,
+    permeate_tank_high    BOOLEAN,
+    permeate_tank_low     BOOLEAN,
+    final_tank_high       BOOLEAN,
+    final_tank_low        BOOLEAN,
+    pressure_ok           BOOLEAN,
+    softener_regenerating BOOLEAN,
+    well_low_level        BOOLEAN,
+    dosing_ok             BOOLEAN,
+    permeate_tank_demand  BOOLEAN,
+    final_tank_demand     BOOLEAN,
+    phase_failure         BOOLEAN
 );
 CREATE INDEX IF NOT EXISTS idx_inputs_device_time
     ON telemetry_inputs (device_id, time DESC);
 
 CREATE TABLE IF NOT EXISTS telemetry_outputs (
-    time            TIMESTAMPTZ     NOT NULL,
-    device_id       TEXT            NOT NULL,
-    pump_low        BOOLEAN,
-    pump_high       BOOLEAN,
-    pump_inlet      BOOLEAN,
-    pump_dose       BOOLEAN,
-    valve_flush     BOOLEAN,
-    valve_inlet     BOOLEAN
+    time                TIMESTAMPTZ NOT NULL,
+    device_id           TEXT        NOT NULL,
+    -- v1 columns (firmware < 2.0.0) — kept for backward compat, remove after full fleet migration
+    pump_low            BOOLEAN,
+    pump_high           BOOLEAN,
+    pump_inlet          BOOLEAN,
+    pump_dose           BOOLEAN,
+    valve_flush         BOOLEAN,
+    valve_inlet         BOOLEAN,
+    -- v2 columns — logical output names from io_catalog.h (LogicalOutput enum order)
+    low_pressure_pump   BOOLEAN,
+    high_pressure_pump  BOOLEAN,
+    well_pump           BOOLEAN,
+    transfer_pump       BOOLEAN,
+    flush_valve         BOOLEAN,
+    inlet_valve         BOOLEAN,
+    dosing_pump         BOOLEAN
 );
 CREATE INDEX IF NOT EXISTS idx_outputs_device_time
     ON telemetry_outputs (device_id, time DESC);
