@@ -275,12 +275,13 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
             stopAll();
             break;
 
+        // Reservado para secuencia de apagado controlado (despresurizar, cerrar válvulas en orden).
         case STOPPING:
             state = IDLE;
             break;
     }
 
-    if (retryCount >= (int)processConfigGet().max_retries && state != FAULT) {
+    if (processConfigGet().max_retries > 0 && retryCount >= (int)processConfigGet().max_retries && state != FAULT) {
         faultReason = FaultReason::MAX_RETRIES;
         state = FAULT;
     }

@@ -130,6 +130,29 @@ bool ioMapSet(const IOMapConfig& incoming) {
             Serial.printf("[IOMAP] output[%u] inválido — se conserva valor actual\n", i);
         }
     }
+    // Detección de GPIO duplicados: si un GPIO aparece en más de un slot,
+    // revertir el segundo al valor anterior.
+    for (uint8_t i = 0; i < (uint8_t)LogicalInput::COUNT; i++) {
+        if (_cfg.inputs[i].gpio == IOMAP_GPIO_NONE) continue;
+        for (uint8_t j = i + 1; j < (uint8_t)LogicalInput::COUNT; j++) {
+            if (_cfg.inputs[j].gpio == _cfg.inputs[i].gpio) {
+                Serial.printf("[IOMAP] GPIO %u duplicado en input[%u] e input[%u] — input[%u] revertido\n",
+                              _cfg.inputs[j].gpio, i, j, j);
+                _cfg.inputs[j] = before.inputs[j];
+            }
+        }
+    }
+    for (uint8_t i = 0; i < (uint8_t)LogicalOutput::COUNT; i++) {
+        if (_cfg.outputs[i].gpio == IOMAP_GPIO_NONE) continue;
+        for (uint8_t j = i + 1; j < (uint8_t)LogicalOutput::COUNT; j++) {
+            if (_cfg.outputs[j].gpio == _cfg.outputs[i].gpio) {
+                Serial.printf("[IOMAP] GPIO %u duplicado en output[%u] y output[%u] — output[%u] revertido\n",
+                              _cfg.outputs[j].gpio, i, j, j);
+                _cfg.outputs[j] = before.outputs[j];
+            }
+        }
+    }
+
     if (incoming.updated_at > 0) _cfg.updated_at = incoming.updated_at;
 
     ioMapSave();

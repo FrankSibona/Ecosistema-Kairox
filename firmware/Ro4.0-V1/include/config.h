@@ -110,8 +110,8 @@
 // sin process_config MQTT configurado.
 #define PROCCFG_MAGIC   0x4B585043U   // 'K','X','P','C'
 #define PROCCFG_VERSION 1U
-#define PROCCFG_PRESSURE_STABILIZATION_DELAY_SEC_DEFAULT  10U  // LOW_PUMP_FILL_TIME/1000
-#define PROCCFG_STARTUP_TIMEOUT_SEC_DEFAULT                5U  // PRESSURE_CHECK_TIME/1000
+#define PROCCFG_PRESSURE_STABILIZATION_DELAY_SEC_DEFAULT   5U  // seg. antes de encender bomba de alta
+#define PROCCFG_STARTUP_TIMEOUT_SEC_DEFAULT               15U  // seg. totales en STARTING (debe ser > stabilization)
 #define PROCCFG_RETRY_INTERVAL_SEC_DEFAULT                10U  // RETRY_DELAY/1000
 #define PROCCFG_MAX_RETRIES_DEFAULT                        5U  // FSM_MAX_RETRIES
 #define PROCCFG_FLUSH_DURATION_SEC_DEFAULT                60U  // FLUSH_TDS_TIME/1000
@@ -131,26 +131,6 @@
 // reproducen el comportamiento actual sin reglas configuradas).
 #define RULES_MAGIC   0x4B58524CU  // 'K','X','R','L' — identifica el blob rules
 #define RULES_VERSION 1U           // incrementar ante cambios de catálogo/struct
-
-// ================= FSM =================
-#define LOW_PUMP_FILL_TIME   10000
-#define PRESSURE_CHECK_TIME   5000
-#define RETRY_DELAY          10000
-#define FSM_MAX_RETRIES          5
-
-#define FLUSH_START_TIME     10000
-#define FLUSH_STOP_TIME      10000
-#define FLUSH_TDS_TIME       60000
-
-#define TDS_DELAY            3600000
-#define MIN_TIME_BETWEEN_FLUSH 14400000
-#define TDS_LIMIT_PPM 500.0f  // ppm — umbral referencia (no usado en FSM actual)
-
-// ================= FILTROS =================
-#define DEMAND_FILTER_TIME   3000   // 3s
-#define CRUDO_FILTER_TIME    3000
-#define PRESSURE_FILTER_TIME 2000
-
 
 // ================= MQTT =================
 #define MQTT_BROKER "159.112.132.176"
@@ -190,10 +170,3 @@
 // Se alimenta únicamente desde el loop principal (ver main.cpp).
 #define WATCHDOG_TIMEOUT_SEC 30U
 
-#define DEVICE_ID "osmosis_01"
-
-#define TOPIC_STATE   "fyntek/osmosis_01/state"
-#define TOPIC_PROCESS "fyntek/osmosis_01/process"
-#define TOPIC_QUALITY "fyntek/osmosis_01/quality"
-#define TOPIC_EVENT   "fyntek/osmosis_01/event"
-#define TOPIC_CMD     "fyntek/osmosis_01/cmd"

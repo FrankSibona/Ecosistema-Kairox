@@ -16,6 +16,16 @@ static ProcessConfig defaultProcessConfig() {
     return c;
 }
 
+static bool processConfigValid(const ProcessConfig& c) {
+    if (c.pressure_stabilization_delay_sec > 300) return false;
+    if (c.startup_timeout_sec < 1 || c.startup_timeout_sec > 300) return false;
+    if (c.retry_interval_sec < 1 || c.retry_interval_sec > 300) return false;
+    if (c.max_retries < 1 || c.max_retries > 20) return false;
+    if (c.flush_duration_sec < 1 || c.flush_duration_sec > 600) return false;
+    if (c.startup_timeout_sec <= c.pressure_stabilization_delay_sec) return false;
+    return true;
+}
+
 void processConfigInit() {
     Preferences p;
     p.begin("kx_proccfg", true);
@@ -23,10 +33,13 @@ void processConfigInit() {
     uint32_t version = p.getUInt("version", 0);
     if (magic == PROCCFG_MAGIC && version == PROCCFG_VERSION) {
         size_t n = p.getBytes("data", &_cfg, sizeof(_cfg));
-        if (n == sizeof(_cfg)) {
+        if (n == sizeof(_cfg) && processConfigValid(_cfg)) {
             p.end();
             Serial.printf("[PROCCFG] Init OK — updated_at=%u\n", (unsigned)_cfg.updated_at);
             return;
+        }
+        if (n == sizeof(_cfg)) {
+            Serial.println("[PROCCFG] NVS con valores fuera de rango — usando defaults");
         }
     }
     p.end();
@@ -42,6 +55,10 @@ bool processConfigSet(const ProcessConfig& incoming) {
     if (incoming.updated_at > 0 && incoming.updated_at <= _cfg.updated_at) {
         Serial.printf("[PROCCFG] IGNORED — updated_at=%u <= actual=%u\n",
                       (unsigned)incoming.updated_at, (unsigned)_cfg.updated_at);
+        return false;
+    }
+    if (!processConfigValid(incoming)) {
+        Serial.println("[PROCCFG] REJECTED — valores fuera de rango o startup_timeout <= stabilization_delay");
         return false;
     }
     _cfg.pressure_stabilization_delay_sec = incoming.pressure_stabilization_delay_sec;

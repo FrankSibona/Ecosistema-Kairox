@@ -98,12 +98,18 @@ static RuleConfig parseRuleEntry(JsonObject obj) {
         SignalSrc src;
         if (strcmp(source, "derived") == 0) {
             DerivedSignal d = derivedSignalFromName(signal);
-            if (d == DerivedSignal::COUNT) continue;
+            if (d == DerivedSignal::COUNT) {
+                Serial.printf("[RULES] WARN: señal derivada desconocida '%s' — término ignorado\n", signal);
+                continue;
+            }
             sigId = (uint8_t)d;
             src   = SignalSrc::DERIVED;
         } else {
             LogicalInput in = logicalInputFromName(signal);
-            if (in == LogicalInput::COUNT) continue;
+            if (in == LogicalInput::COUNT) {
+                Serial.printf("[RULES] WARN: señal de entrada desconocida '%s' — término ignorado\n", signal);
+                continue;
+            }
             sigId = (uint8_t)in;
             src   = SignalSrc::SIG_INPUT;
         }
@@ -369,9 +375,15 @@ unsigned long lastWifiCheck = 0;
 unsigned long lastMqttReconnect = 0;
 
 // ── WiFi fallback portal (ver setupWiFi() / WIFI_FALLBACK_* en config.h) ────
-unsigned long wifiDownSince = 0;  // 0 = conectado o portal de fallback activo
+// Counter-based: cuenta checks desconectados en ventana de 5 checks (50s).
+// Si >= 3 de 5 están desconectados, abre portal.
+static uint8_t wifiCheckHistory[5] = {1,1,1,1,1};  // 1=ok, 0=down; init como "conectado"
+static uint8_t wifiCheckIdx = 0;
 bool fallbackPortalActive   = false;
-unsigned long lastPortalHeapLog = 0;  // último log periódico de heap con portal abierto
+unsigned long lastPortalHeapLog = 0;
+
+// Flag para forzar re-publish de /state tras reconexión MQTT.
+static bool forceStatePublish = false;
 
 // true una vez que configTime() fue llamado tras la primera conexión WiFi.
 // Permite disparar la sincronización NTP también cuando la conexión se
@@ -522,6 +534,7 @@ void Comms::reconnect() {
 
         // 🔥 SNAPSHOT REAL
         sendSnapshot = true;
+        forceStatePublish = true;
 
     } else {
         Serial.println("❌ MQTT reconectando...");
@@ -603,28 +616,29 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
     if (now - lastWifiCheck > 10000) {
         lastWifiCheck = now;
 
-        if (WiFi.status() != WL_CONNECTED) {
+        // Counter-based: registra resultado de cada check (1=ok, 0=down).
+        // Si >= 3 de las últimas 5 verificaciones (50s) están desconectadas, abre portal.
+        bool wifiOk = (WiFi.status() == WL_CONNECTED);
+        wifiCheckHistory[wifiCheckIdx] = wifiOk ? 1 : 0;
+        wifiCheckIdx = (wifiCheckIdx + 1) % 5;
+
+        if (!wifiOk) {
             Serial.println("[COMMS] WiFi reconectando...");
             WiFi.reconnect();
             ntpConfigured = false;
 
-            if (wifiDownSince == 0) wifiDownSince = now;
+            uint8_t downCount = 0;
+            for (uint8_t i = 0; i < 5; i++) if (wifiCheckHistory[i] == 0) downCount++;
 
-            // Fallback de reconfiguración: sin conexión por WIFI_FALLBACK_DELAY_SEC
-            // (debounce, evita abrir/cerrar ante micro-cortes) -> abrir portal
-            // AP+STA y dejarlo abierto sin timeout (credenciales guardadas
-            // siguen reintentando en background, ver bloque de abajo).
-            if (!fallbackPortalActive
-                && now - wifiDownSince >= (WIFI_FALLBACK_DELAY_SEC * 1000UL)) {
-                Serial.printf("[WIFI] Sin conexion >%us — portal fallback '%s' (heap libre: %u)\n",
-                    WIFI_FALLBACK_DELAY_SEC, fallbackPortalSSID().c_str(), ESP.getFreeHeap());
+            if (!fallbackPortalActive && downCount >= 3) {
+                Serial.printf("[WIFI] %u/5 checks desconectados — portal fallback '%s' (heap libre: %u)\n",
+                    downCount, fallbackPortalSSID().c_str(), ESP.getFreeHeap());
                 wm.setConfigPortalBlocking(false);
                 wm.startConfigPortal(fallbackPortalSSID().c_str(), fallbackPortalPassword().c_str());
                 fallbackPortalActive = true;
                 lastPortalHeapLog = now;
             }
         } else {
-            wifiDownSince = 0;
             if (!ntpConfigured) {
                 configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
                 ntpConfigured = true;
@@ -800,9 +814,10 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
 
     String currentState = String(c.getStateName());
 
-    if (currentState != lastStateSent) {
+    if (currentState != lastStateSent || forceStatePublish) {
 
         lastStateSent = currentState;
+        forceStatePublish = false;
 
         String json = "{";
         json += "\"device_id\":\"" + device_id + "\",";

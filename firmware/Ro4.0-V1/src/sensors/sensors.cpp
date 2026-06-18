@@ -332,41 +332,6 @@ void Sensors::begin() {
     // ── ADC burst diagnostic — 100 samples, min/max/avg. Remove after investigation.
     // Note: analogRead() and analogReadMilliVolts() perform SEPARATE conversions —
     // they do not share a sample. esp_adc_cal returns a non-zero mV for raw=0
-    // (curve intercept) — voltages below the ADC's minimum measurable input
-    // produce raw=0 regardless of actual voltage. TDS1/TDS2 now run at ADC_0db
-    // (~950mV full scale, ~0.23mV/cuenta) — usar este burst para medir agua de
-    // ósmosis (~14mV reales) y verificar si el piso bajó respecto a 11db/6db.
-    {
-        const int N = 100;
-        long  s1r = 0, s1m = 0, s2r = 0, s2m = 0;
-        int mn1r = 4095, mx1r = 0, mn1m = 99999, mx1m = 0;
-        int mn2r = 4095, mx2r = 0, mn2m = 99999, mx2m = 0;
-
-        for (int i = 0; i < N; i++) {
-            int r1 = analogRead(PIN_TDS1);
-            int m1 = analogReadMilliVolts(PIN_TDS1);
-            int r2 = analogRead(PIN_TDS2);
-            int m2 = analogReadMilliVolts(PIN_TDS2);
-
-            s1r += r1;  if (r1 < mn1r) mn1r = r1;  if (r1 > mx1r) mx1r = r1;
-            s1m += m1;  if (m1 < mn1m) mn1m = m1;  if (m1 > mx1m) mx1m = m1;
-            s2r += r2;  if (r2 < mn2r) mn2r = r2;  if (r2 > mx2r) mx2r = r2;
-            s2m += m2;  if (m2 < mn2m) mn2m = m2;  if (m2 > mx2m) mx2m = m2;
-
-            delay(1);
-        }
-
-        Serial.println("[ADC_DIAG] ========================================");
-        Serial.printf ("[ADC_DIAG] Atten: ADC_0db (TDS1/TDS2)  Res: 12-bit  N=%d samples\n", N);
-        Serial.printf ("[ADC_DIAG] Scale: ~950mV/4095cnt (~0.23mV/cnt)\n");
-        Serial.printf ("[ADC_DIAG] GPIO%d TDS1  raw: avg=%4ld min=%4d max=%4d  "
-                       "mv: avg=%4ld min=%4d max=%4d\n",
-                       PIN_TDS1, s1r/N, mn1r, mx1r, s1m/N, mn1m, mx1m);
-        Serial.printf ("[ADC_DIAG] GPIO%d TDS2  raw: avg=%4ld min=%4d max=%4d  "
-                       "mv: avg=%4ld min=%4d max=%4d\n",
-                       PIN_TDS2, s2r/N, mn2r, mx2r, s2m/N, mn2m, mx2m);
-        Serial.println("[ADC_DIAG] ========================================");
-    }
 }
 
 // ── Update (called every loop iteration) ─────────────────────────────────────
@@ -407,13 +372,17 @@ void Sensors::update() {
         last_pulses1 = p1;
         last_pulses2 = p2;
 
-        // Volumen acumulado: litros reales de esta ventana, independiente de dt_ms.
-        totalPerm += p1 / _cfg.flow_factor_1;
-        totalRech += p2 / _cfg.flow_factor_2;
-
-        // Caudal instantáneo normalizado al dt real.
-        flow1 = (p1 * 60000.0f) / (dt_ms * _cfg.flow_factor_1);
-        flow2 = (p2 * 60000.0f) / (dt_ms * _cfg.flow_factor_2);
+        // Guard: flow_factor corrupto → skip cálculo para evitar div-by-zero.
+        float ff1 = _cfg.flow_factor_1;
+        float ff2 = _cfg.flow_factor_2;
+        if (ff1 < 10.0f || ff2 < 10.0f) {
+            Serial.println("[SENSORS] WARN: flow_factor < 10 — cálculo de caudal omitido");
+        } else {
+            totalPerm += p1 / ff1;
+            totalRech += p2 / ff2;
+            flow1 = (p1 * 60000.0f) / (dt_ms * ff1);
+            flow2 = (p2 * 60000.0f) / (dt_ms * ff2);
+        }
 
         lastFlowTime = now_ms;
     }
@@ -554,6 +523,7 @@ void Sensors::updateSignals() {
         if (e.debounce_ms == 0) {
             _sigStable[i] = raw;
             _sigRaw[i] = raw;
+            _sigEdgeStart[i] = now;
             continue;
         }
 

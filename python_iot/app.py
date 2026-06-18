@@ -344,6 +344,8 @@ def map_severity_to_health(severity: str) -> str:
 class DatabasePool:
     def __init__(self):
         self._pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
+        self._consecutive_errors: int = 0
+        self._last_error_time: Optional[str] = None
 
     def connect(self):
         self._pool = psycopg2.pool.ThreadedConnectionPool(
@@ -353,15 +355,47 @@ class DatabasePool:
         )
         log.info("✅ DB pool conectado")
 
+    def _on_db_success(self):
+        self._consecutive_errors = 0
+
+    def _on_db_error(self, context: str):
+        self._consecutive_errors += 1
+        self._last_error_time = datetime.now(timezone.utc).isoformat()
+        n = self._consecutive_errors
+        if n == 3:
+            log.critical(f"[DB] {n} errores consecutivos — posible caída de PostgreSQL")
+        if n >= 10 and n % 10 == 0:
+            log.critical(f"[DB] {n} errores consecutivos — telemetría se está PERDIENDO")
+        if n >= 3:
+            try:
+                if mqtt_client and mqtt_client.is_connected():
+                    import json as _j
+                    mqtt_client.publish("fyntek/system/alerts", _j.dumps({
+                        "type": "DB_UNAVAILABLE", "errors": n,
+                        "since": self._last_error_time,
+                    }))
+            except Exception:
+                pass
+
+    @property
+    def health(self) -> dict:
+        return {
+            "status": "ok" if self._consecutive_errors == 0 else "error",
+            "consecutive_errors": self._consecutive_errors,
+            "last_error": self._last_error_time,
+        }
+
     def execute(self, sql: str, params: tuple = ()):
         conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
             conn.commit()
+            self._on_db_success()
         except Exception as e:
             conn.rollback()
             log.error(f"DB error: {e} | SQL: {sql[:80]}")
+            self._on_db_error("execute")
         finally:
             self._pool.putconn(conn)
 
@@ -370,9 +404,12 @@ class DatabasePool:
         try:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
-                return cur.fetchall()
+                result = cur.fetchall()
+            self._on_db_success()
+            return result
         except Exception as e:
             log.error(f"DB fetch error: {e}")
+            self._on_db_error("fetchall")
             return []
         finally:
             self._pool.putconn(conn)
@@ -384,16 +421,19 @@ class DatabasePool:
                 cur.execute(sql, params)
                 row = cur.fetchone()
             conn.commit()
+            self._on_db_success()
             return row[0] if row else None
         except Exception as e:
             conn.rollback()
             log.error(f"DB insert_returning error: {e}")
+            self._on_db_error("insert_returning")
             return None
         finally:
             self._pool.putconn(conn)
 
 
 db = DatabasePool()
+_BACKEND_START_TIME = time.time()
 
 # ============================================================
 # UTILIDADES
@@ -3070,6 +3110,20 @@ def on_message(client, userdata, msg):
 # ============================================================
 
 api = Flask(__name__)
+
+
+@api.route("/api/health", methods=["GET"])
+def health_check():
+    mqtt_ok = mqtt_client.is_connected() if mqtt_client else False
+    db_info = db.health
+    overall = "ok" if db_info["status"] == "ok" and mqtt_ok else "degraded"
+    return jsonify({
+        "status": overall,
+        "db": db_info,
+        "mqtt": {"connected": mqtt_ok},
+        "uptime_sec": int(time.time() - _BACKEND_START_TIME),
+    })
+
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 

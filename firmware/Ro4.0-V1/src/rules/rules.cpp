@@ -175,6 +175,10 @@ bool rulesSet(const RulesConfig& incoming) {
             Serial.printf("[RULES] fault_rules[%u] inválido — se conserva valor actual\n", i);
         }
     }
+    if (incoming.fault_rule_count > FAULT_RULES_MAX) {
+        Serial.printf("[RULES] WARN: fault_rule_count=%u > máximo=%u — truncado\n",
+                      incoming.fault_rule_count, FAULT_RULES_MAX);
+    }
     _cfg.fault_rule_count = (incoming.fault_rule_count <= FAULT_RULES_MAX)
                                 ? incoming.fault_rule_count
                                 : FAULT_RULES_MAX;
