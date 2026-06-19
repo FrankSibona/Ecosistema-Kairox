@@ -3660,6 +3660,19 @@ def _publish_device_process_config(device_id: str, cfg: dict):
 
 
 # ============================================================
+# WIFI RESET — forzar apertura de portal WiFiManager vía MQTT
+# ============================================================
+
+@api.route("/api/wifi/reset/<device_id>", methods=["POST"])
+def wifi_reset(device_id):
+    if not mqtt_client or not mqtt_client.is_connected():
+        return jsonify({"error": "mqtt_not_connected"}), 503
+    mqtt_client.publish(f"fyntek/{device_id}/wifi/reset", "{}")
+    log.info(f"[{device_id}] WiFi reset solicitado")
+    return jsonify({"status": "sent", "device_id": device_id})
+
+
+# ============================================================
 # PROFILE — perfil completo de instalación (io_map + features + rules)
 # en una sola operación. Reusa validate_*/merge_*/_publish_device_* — no
 # agrega columnas ni tópicos MQTT nuevos.

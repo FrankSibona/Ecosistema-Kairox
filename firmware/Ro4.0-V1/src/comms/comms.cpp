@@ -346,6 +346,19 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         if (s_flightrec) s_flightrec->startDump();
         return;
     }
+
+    // ── /wifi/reset — forzar apertura de portal WiFiManager ─────────────────
+    char wifi_topic[72];
+    snprintf(wifi_topic, sizeof(wifi_topic), "fyntek/%s/wifi/reset", device_id.c_str());
+    if (strcmp(topic, wifi_topic) == 0) {
+        Serial.printf("[WIFI] Reset solicitado por MQTT (heap libre: %u)\n", ESP.getFreeHeap());
+        if (!fallbackPortalActive) {
+            wm.setConfigPortalBlocking(false);
+            wm.startConfigPortal(fallbackPortalSSID().c_str(), fallbackPortalPassword().c_str());
+            fallbackPortalActive = true;
+        }
+        return;
+    }
 }
 
 // ================= CONFIG =================
@@ -531,6 +544,7 @@ void Comms::reconnect() {
         mqttClient.subscribe(baseTopic("process_config").c_str());
         mqttClient.subscribe(baseTopic("diag/ctrl").c_str());
         mqttClient.subscribe(baseTopic("diag/flightrec/get").c_str());
+        mqttClient.subscribe(baseTopic("wifi/reset").c_str());
 
         // 🔥 SNAPSHOT REAL
         sendSnapshot = true;
