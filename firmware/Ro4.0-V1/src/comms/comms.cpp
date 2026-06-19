@@ -31,6 +31,13 @@ static Sensors*        s_sensors   = nullptr;
 static DiagMode*       s_diag      = nullptr;
 static FlightRecorder* s_flightrec = nullptr;
 
+// Forward-declarations — usadas por mqttCallback (definido antes de las
+// implementaciones en la sección TIMERS/HELPERS).
+extern WiFiManager wm;
+extern bool fallbackPortalActive;
+String fallbackPortalSSID();
+String fallbackPortalPassword();
+
 // Maps ReceiveResult to a human-readable string for field logs.
 // ACCEPTED(0) DUPLICATE(1) BUSY(2) INVALID_JSON(3) UNKNOWN_COMMAND(4)
 static const char* receiveResultName(ReceiveResult r) {
@@ -681,7 +688,6 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
             wm.stopConfigPortal();
             WiFi.mode(WIFI_STA);
             fallbackPortalActive = false;
-            wifiDownSince = 0;
             ntpConfigured = false;  // forzar re-sync NTP en el próximo ciclo
             Serial.printf("[WIFI] Portal fallback cerrado — reconectado (heap libre: %u)\n",
                 ESP.getFreeHeap());
