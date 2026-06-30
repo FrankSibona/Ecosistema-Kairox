@@ -16,6 +16,7 @@
 #include "../io/io_catalog.h"
 #include "../rules/rules.h"
 #include "../control/process_config.h"
+#include "../safety/antifreeze.h"
 #include <config.h>
 
 // ================= DEVICE ID =================
@@ -328,6 +329,38 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
+    // ── /antifreeze_config ───────────────────────────────────────────────────
+    // Retained: protección anti-congelamiento opcional. Partial update —
+    // campos ausentes conservan el valor actual (mismo patrón que /config,
+    // /iomap, /rules, /process_config).
+    char afreeze_topic[80];
+    snprintf(afreeze_topic, sizeof(afreeze_topic), "fyntek/%s/antifreeze_config", device_id.c_str());
+    if (strcmp(topic, afreeze_topic) == 0) {
+        StaticJsonDocument<512> doc;
+        DeserializationError err = deserializeJson(doc, payload, length);
+        if (err) {
+            Serial.print("[AFREEZE] JSON inválido: ");
+            Serial.println(err.c_str());
+            return;
+        }
+        AntifreezeConfig cur = antifreezeConfigGet();
+        AntifreezeConfig incoming;
+        incoming.enabled                  = doc["enabled"]                  | cur.enabled;
+        incoming.sensor_enabled           = doc["sensor_enabled"]           | cur.sensor_enabled;
+        incoming.sensor_gpio              = doc["sensor_gpio"]              | cur.sensor_gpio;
+        incoming.temp_threshold_low_c     = doc["temp_threshold_low_c"]     | cur.temp_threshold_low_c;
+        incoming.temp_threshold_high_c    = doc["temp_threshold_high_c"]    | cur.temp_threshold_high_c;
+        incoming.flush_duration_sec       = doc["flush_duration_sec"]       | cur.flush_duration_sec;
+        incoming.eval_interval_sec        = doc["eval_interval_sec"]        | cur.eval_interval_sec;
+        incoming.boot_inhibit_sec         = doc["boot_inhibit_sec"]         | cur.boot_inhibit_sec;
+        incoming.min_valid_temp_c         = doc["min_valid_temp_c"]         | cur.min_valid_temp_c;
+        incoming.max_valid_temp_c         = doc["max_valid_temp_c"]         | cur.max_valid_temp_c;
+        incoming.max_consecutive_failures = doc["max_consecutive_failures"] | cur.max_consecutive_failures;
+        incoming.updated_at               = doc["updated_at"]               | (uint32_t)0;
+        antifreezeConfigSet(incoming);
+        return;
+    }
+
     // ── /diag/ctrl ───────────────────────────────────────────────────────────
     char diag_topic[72];
     snprintf(diag_topic, sizeof(diag_topic), "fyntek/%s/diag/ctrl", device_id.c_str());
@@ -376,7 +409,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "2.0.0";
+const char* fw_version = "2.1.0";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -549,6 +582,7 @@ void Comms::reconnect() {
         mqttClient.subscribe(baseTopic("iomap").c_str());
         mqttClient.subscribe(baseTopic("rules").c_str());
         mqttClient.subscribe(baseTopic("process_config").c_str());
+        mqttClient.subscribe(baseTopic("antifreeze_config").c_str());
         mqttClient.subscribe(baseTopic("diag/ctrl").c_str());
         mqttClient.subscribe(baseTopic("diag/flightrec/get").c_str());
         mqttClient.subscribe(baseTopic("wifi/reset").c_str());
@@ -782,6 +816,24 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
                 (unsigned)pc.updated_at);
             mqttClient.publish(baseTopic("process_config").c_str(), json, true);
         }
+
+        // ===== ANTIFREEZE CONFIG (retained) =====
+        {
+            const AntifreezeConfig& ac = antifreezeConfigGet();
+            char json[384];
+            snprintf(json, sizeof(json),
+                "{\"enabled\":%u,\"sensor_enabled\":%u,\"sensor_gpio\":%u,"
+                "\"temp_threshold_low_c\":%.1f,\"temp_threshold_high_c\":%.1f,"
+                "\"flush_duration_sec\":%u,\"eval_interval_sec\":%u,\"boot_inhibit_sec\":%u,"
+                "\"min_valid_temp_c\":%.1f,\"max_valid_temp_c\":%.1f,"
+                "\"max_consecutive_failures\":%u,\"updated_at\":%u}",
+                ac.enabled, ac.sensor_enabled, ac.sensor_gpio,
+                ac.temp_threshold_low_c, ac.temp_threshold_high_c,
+                (unsigned)ac.flush_duration_sec, (unsigned)ac.eval_interval_sec, (unsigned)ac.boot_inhibit_sec,
+                ac.min_valid_temp_c, ac.max_valid_temp_c,
+                ac.max_consecutive_failures, (unsigned)ac.updated_at);
+            mqttClient.publish(baseTopic("antifreeze_config").c_str(), json, true);
+        }
     }
 
 
@@ -901,12 +953,28 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
 
         // -- connectivity / FSM state --
         {
+            // Edge-detector de cadencia 10s para el timestamp del último ciclo
+            // de antifreeze — suficiente resolución dado que el ciclo más
+            // corto razonable (flush_duration_sec, mín. 10s) no puede perderse
+            // entre dos heartbeats consecutivos.
+            static bool afActiveSeen = false;
+            static long afLastCycleTs = 0;
+            bool afActive = c.isAntifreezeActive();
+            if (afActive && !afActiveSeen) afLastCycleTs = ts;
+            afActiveSeen = afActive;
+
             String json = "{";
             json += "\"device_id\":\"" + device_id + "\",";
             json += "\"ts\":" + String(ts) + ",";
             json += "\"status\":\"online\",";
             json += "\"state\":\"" + String(c.getStateName()) + "\",";
-            json += "\"fault_reason\":\"" + String(c.getFaultReasonName()) + "\"";
+            json += "\"activity\":\"" + String(c.getActivityName()) + "\",";
+            json += "\"fault_reason\":\"" + String(c.getFaultReasonName()) + "\",";
+            json += "\"antifreeze_active\":" + String(afActive) + ",";
+            json += "\"antifreeze_sensor_fault\":" + String(antifreezeIsSensorFault()) + ",";
+            json += "\"ambient_temp_c\":" + floatOrNull(antifreezeGetTempC()) + ",";
+            json += "\"ambient_humidity_pct\":" + floatOrNull(antifreezeGetHumidityPct()) + ",";
+            json += "\"antifreeze_last_cycle_ts\":" + String(afLastCycleTs);
             json += "}";
             mqttClient.publish(baseTopic("heartbeat").c_str(), json.c_str());
         }

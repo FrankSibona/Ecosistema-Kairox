@@ -120,6 +120,7 @@ import alert_config as acfg
 import io_catalog
 import rule_catalog
 import process_config_catalog
+import antifreeze_catalog
 from collections import deque, defaultdict
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional, Dict, List, Any
@@ -2375,7 +2376,7 @@ class MessageProcessor:
         if event_diags:
             final_root = event_diags[0]
             is_new     = True
-        elif confirmed_slow:
+        elif confirmed_slow and confirmed_slow_diags:
             confirmed_diags = sorted(
                 confirmed_slow_diags,
                 key=lambda d: d.score, reverse=True
@@ -3660,6 +3661,63 @@ def _publish_device_process_config(device_id: str, cfg: dict):
 
 
 # ============================================================
+# ANTIFREEZE CONFIG — protección anti-congelamiento opcional (DHT22)
+# (ver antifreeze_catalog.py / firmware src/safety/antifreeze.h)
+# ============================================================
+
+@api.route("/api/antifreeze_config/<device_id>", methods=["GET"])
+def get_antifreeze_config(device_id):
+    rows = db.fetchall(
+        "SELECT antifreeze_config FROM devices WHERE device_id=%s",
+        (device_id,)
+    )
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+    stored, = rows[0]
+    cfg, warnings = antifreeze_catalog.validate_antifreeze_config(
+        antifreeze_catalog.merge_antifreeze_config(stored)
+    )
+    return jsonify({
+        "antifreeze_config": cfg,
+        "warnings":          warnings,
+        "catalog": {
+            "labels": antifreeze_catalog.ANTIFREEZE_LABELS,
+            "limits": {k: {"min": v[0], "max": v[1]}
+                       for k, v in antifreeze_catalog.ANTIFREEZE_LIMITS.items()},
+        },
+    })
+
+
+@api.route("/api/antifreeze_config/<device_id>", methods=["POST"])
+def set_antifreeze_config(device_id):
+    rows = db.fetchall("SELECT 1 FROM devices WHERE device_id=%s", (device_id,))
+    if not rows:
+        return jsonify({"error": "device not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    cfg, warnings = antifreeze_catalog.validate_antifreeze_config(
+        data.get("antifreeze_config") or data
+    )
+
+    db.execute(
+        "UPDATE devices SET antifreeze_config=%s WHERE device_id=%s",
+        (json.dumps(cfg), device_id),
+    )
+    _publish_device_antifreeze_config(device_id, cfg)
+    return jsonify({"status": "ok", "warnings": warnings})
+
+
+def _publish_device_antifreeze_config(device_id: str, cfg: dict):
+    if not mqtt_client:
+        return
+    import json as _json
+    import time as _time
+    payload = _json.dumps({**cfg, "updated_at": int(_time.time())})
+    mqtt_client.publish(f"fyntek/{device_id}/antifreeze_config", payload, retain=True)
+    log.info(f"[{device_id}] AntifreezeConfig MQTT publicado (retained)")
+
+
+# ============================================================
 # WIFI RESET — forzar apertura de portal WiFiManager vía MQTT
 # ============================================================
 
@@ -4757,6 +4815,63 @@ select{background:#1e2130;border:1px solid #2d3348;color:#e2e8f0;
 </div>
 
 <div class="card">
+  <div class="card-title">Anti-congelamiento (opcional)</div>
+  <p class="hint">Hace circular agua de pozo cuando la temperatura ambiente cae bajo el umbral,
+  para evitar congelamiento de agua estancada con el equipo detenido. Requiere sensor DHT22
+  cableado y FW ≥ 2.1.0. Deshabilitado por defecto — sin sensor, no tiene efecto.</p>
+  <div class="cfg-field cfg-check">
+    <label>Protección habilitada</label>
+    <input type="checkbox" id="af-enabled">
+  </div>
+  <div class="cfg-field cfg-check">
+    <label>Sensor DHT22 habilitado</label>
+    <input type="checkbox" id="af-sensor-enabled">
+  </div>
+  <div class="cfg-field">
+    <label>GPIO del sensor</label>
+    <input type="number" id="af-gpio" step="1" min="0" max="39" placeholder="21">
+  </div>
+  <div class="cfg-section">Histéresis</div>
+  <div class="cfg-field">
+    <label>Umbral de riesgo [°C] (activa)</label>
+    <input type="number" id="af-thr-low" step="0.5" placeholder="0">
+  </div>
+  <div class="cfg-field">
+    <label>Umbral de recuperación [°C] (desactiva)</label>
+    <input type="number" id="af-thr-high" step="0.5" placeholder="3">
+  </div>
+  <div class="cfg-section">Cadencia</div>
+  <div class="cfg-field">
+    <label>Duración del ciclo [s]</label>
+    <input type="number" id="af-flush-dur" step="10" min="10" max="3600" placeholder="300">
+  </div>
+  <div class="cfg-field">
+    <label>Intervalo entre evaluaciones [s]</label>
+    <input type="number" id="af-eval-int" step="60" min="60" max="86400" placeholder="3600">
+  </div>
+  <div class="cfg-field">
+    <label>Inhibición post-arranque [s]</label>
+    <input type="number" id="af-boot-inhibit" step="10" min="0" max="3600" placeholder="120">
+  </div>
+  <div class="cfg-section">Validación del sensor</div>
+  <div class="cfg-field">
+    <label>Temperatura válida mínima [°C]</label>
+    <input type="number" id="af-min-valid" step="1" placeholder="-40">
+  </div>
+  <div class="cfg-field">
+    <label>Temperatura válida máxima [°C]</label>
+    <input type="number" id="af-max-valid" step="1" placeholder="60">
+  </div>
+  <div class="cfg-field">
+    <label>Fallos consecutivos -&gt; sensor_fault</label>
+    <input type="number" id="af-max-fail" step="1" min="1" max="20" placeholder="5">
+  </div>
+  <button onclick="saveAntifreezeConfig()" style="background:#7c3aed;color:#fff;width:100%;padding:.75rem">
+    Guardar anti-congelamiento
+  </button>
+</div>
+
+<div class="card">
   <div class="card-title">Mapeo de E/S (avanzado)</div>
   <p class="hint">Asigna pines físicos a señales lógicas y habilita features del equipo.
   No cambia el comportamiento actual del equipo — requiere FW ≥ 1.1.5 para sincronizar.</p>
@@ -5400,10 +5515,62 @@ async function saveProcessConfig(){
   }
 }
 
+async function loadAntifreezeConfig(){
+  try {
+    const r = await fetch('/api/antifreeze_config/'+dev());
+    if(!r.ok) return;
+    const c = await r.json();
+    const a = c.antifreeze_config;
+    document.getElementById('af-enabled').checked        = !!a.enabled;
+    document.getElementById('af-sensor-enabled').checked  = !!a.sensor_enabled;
+    document.getElementById('af-gpio').value              = a.sensor_gpio;
+    document.getElementById('af-thr-low').value           = a.temp_threshold_low_c;
+    document.getElementById('af-thr-high').value          = a.temp_threshold_high_c;
+    document.getElementById('af-flush-dur').value         = a.flush_duration_sec;
+    document.getElementById('af-eval-int').value          = a.eval_interval_sec;
+    document.getElementById('af-boot-inhibit').value      = a.boot_inhibit_sec;
+    document.getElementById('af-min-valid').value         = a.min_valid_temp_c;
+    document.getElementById('af-max-valid').value         = a.max_valid_temp_c;
+    document.getElementById('af-max-fail').value          = a.max_consecutive_failures;
+  } catch(e){}
+}
+
+async function saveAntifreezeConfig(){
+  const box = document.getElementById('resp');
+  box.className = 'rbox'; box.textContent = 'Guardando anti-congelamiento...';
+  const payload = {
+    enabled:                  document.getElementById('af-enabled').checked ? 1 : 0,
+    sensor_enabled:           document.getElementById('af-sensor-enabled').checked ? 1 : 0,
+    sensor_gpio:              parseInt(document.getElementById('af-gpio').value)        || 21,
+    temp_threshold_low_c:     parseFloat(document.getElementById('af-thr-low').value)   || 0,
+    temp_threshold_high_c:    parseFloat(document.getElementById('af-thr-high').value)  || 3,
+    flush_duration_sec:       parseInt(document.getElementById('af-flush-dur').value)   || 300,
+    eval_interval_sec:        parseInt(document.getElementById('af-eval-int').value)    || 3600,
+    boot_inhibit_sec:         parseInt(document.getElementById('af-boot-inhibit').value) || 120,
+    min_valid_temp_c:         parseFloat(document.getElementById('af-min-valid').value) || -40,
+    max_valid_temp_c:         parseFloat(document.getElementById('af-max-valid').value) || 60,
+    max_consecutive_failures: parseInt(document.getElementById('af-max-fail').value)    || 5,
+  };
+  try {
+    const r = await fetch('/api/antifreeze_config/'+dev(), {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await r.json();
+    box.className   = 'rbox '+(r.ok?'ok':'er');
+    box.textContent = JSON.stringify(data, null, 2);
+    if(r.ok) loadAntifreezeConfig();
+  } catch(e){
+    box.className = 'rbox er'; box.textContent = 'Error: '+e.message;
+  }
+}
+
 setInterval(poll, 5000);
 poll();
 loadConfig();
 loadProcessConfig();
+loadAntifreezeConfig();
 loadIomap();
 loadRules();
 fetchAlerts();
@@ -5633,6 +5800,8 @@ def main():
     db.execute("ALTER TABLE device_config ADD COLUMN IF NOT EXISTS recovery_protection_enabled BOOLEAN DEFAULT TRUE")
     # Parámetros de temporización FSM configurables (ver process_config_catalog.py)
     db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS process_config JSONB DEFAULT '{}'::jsonb")
+    # Protección anti-congelamiento opcional, DHT22 (ver antifreeze_catalog.py)
+    db.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS antifreeze_config JSONB DEFAULT '{}'::jsonb")
     log.info("✅ Schema migrations aplicadas")
 
     # Pre-populate tracker from DB so panels show correct state after restart

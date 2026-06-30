@@ -62,6 +62,14 @@ public:
     FaultReason getFaultReason();
     const char* getFaultReasonName();
 
+    // "Actividad" — disambigua telemetría sin agregar un SystemState nuevo.
+    // Mismo valor que getStateName() salvo dos casos: "ANTIFREEZE" (state==IDLE
+    // con un ciclo de protección anti-congelamiento activo) y "FLUSH_NORMAL"
+    // (state==FLUSHING, para distinguirlo del flush por demanda). Ver
+    // src/safety/antifreeze.h.
+    const char* getActivityName();
+    bool        isAntifreezeActive() const;
+
     OutputsState getOutputs();
 
     // ── Diagnostic / Flight Recorder getters ────────────────────────────────
@@ -101,6 +109,11 @@ private:
 
     // 🔥 NUEVO: estado REAL de salidas
     OutputsState outputs;
+
+    // Recalculado desde cero cada tick (false por defecto, ver update()) —
+    // true solo mientras case IDLE decide activamente sostener un ciclo de
+    // protección anti-congelamiento. Nunca persiste stale fuera de IDLE.
+    bool antifreezeActive = false;
 
     // OUTPUTS
     void setOutputs(bool pumpLow, bool pumpHigh, bool flush, bool inlet);

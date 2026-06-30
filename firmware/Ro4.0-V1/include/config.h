@@ -162,6 +162,38 @@
 #define WIFI_FALLBACK_DELAY_SEC  20U     // seg. sin conexión -> abrir portal (debounce)
 #define WIFI_PORTAL_HEAP_LOG_SEC 1800U   // log periódico de heap libre con portal abierto
 
+// ── NVS antifreeze integrity ──────────────────────────────────────────────────
+// AFREEZE_MAGIC/AFREEZE_VERSION cubren el blob de protección anti-congelamiento
+// (ver src/safety/antifreeze.h) en NVS namespace "kx_afreeze". Mismo patrón que
+// PROCCFG_MAGIC/PROCCFG_VERSION: si no coinciden, se descarta lo guardado y se
+// usan los defaults (enabled=0 — sin impacto en equipos existentes).
+#define AFREEZE_MAGIC   0x4B584652U   // 'K','X','F','R'
+#define AFREEZE_VERSION 2U            // v2: +boot_inhibit_sec (debounce post-boot)
+
+// Pin digital bidireccional libre para el bus 1-wire del DHT22. NO usar
+// PIN_TDS1/PIN_TDS2/PIN_AIN0/PIN_AIN1 — son input-only en el ESP32 y no
+// soportan el protocolo del DHT22 (requiere que el MCU tire la línea a GND
+// para iniciar la lectura). GPIO21/22 (SDA/SCL nominales — I2C no usado en
+// este firmware) confirmados libres y bidireccionales.
+#define PIN_AFREEZE_DHT_DEFAULT 21U
+
+#define AFREEZE_ENABLED_DEFAULT                   0U     // opt-in — sin impacto en equipos existentes
+#define AFREEZE_SENSOR_ENABLED_DEFAULT             0U
+#define AFREEZE_TEMP_THRESHOLD_LOW_C_DEFAULT     0.0f     // °C — por debajo: riesgo de congelamiento
+#define AFREEZE_TEMP_THRESHOLD_HIGH_C_DEFAULT    3.0f     // °C — por encima: riesgo despejado (histéresis)
+#define AFREEZE_FLUSH_DURATION_SEC_DEFAULT      300U      // 5 min de circulación por ciclo
+#define AFREEZE_EVAL_INTERVAL_SEC_DEFAULT      3600U      // 1 hora entre evaluaciones (no entre fin de ciclo)
+#define AFREEZE_BOOT_INHIBIT_SEC_DEFAULT        120U      // sin evaluar hasta 2 min después del boot (debounce brownouts)
+#define AFREEZE_MIN_VALID_TEMP_C_DEFAULT      -40.0f      // rango de validez DHT22 (descarta sensor en falla)
+#define AFREEZE_MAX_VALID_TEMP_C_DEFAULT       60.0f
+#define AFREEZE_MAX_CONSECUTIVE_FAILURES_DEFAULT  5U      // lecturas inválidas seguidas -> sensor_fault
+
+// Cadencia de lectura del DHT22, independiente de AFREEZE_EVAL_INTERVAL_SEC —
+// mantiene la telemetría (ambient_temp_c, sensor_fault) fresca para monitoreo
+// aunque la decisión de flush solo se reevalúe cada hora. DHT22 exige >=2s
+// entre lecturas (datasheet); 5s deja margen.
+#define AFREEZE_SENSOR_POLL_INTERVAL_MS         5000U
+
 // ================= WATCHDOG =================
 // Task watchdog del ESP32 — red de seguridad ante cuelgues reales (deadlock,
 // bucle infinito, bloqueo de librería). 30s es deliberadamente holgado para

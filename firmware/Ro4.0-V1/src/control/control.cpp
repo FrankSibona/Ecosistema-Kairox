@@ -1,5 +1,6 @@
 #include "control.h"
 #include "process_config.h"
+#include "../safety/antifreeze.h"
 #include <config.h>
 #include <string.h>
 
@@ -52,6 +53,16 @@ const char* Control::getFaultReasonName() {
 
 const char* Control::getStateName() {
     return stateToString(state);
+}
+
+const char* Control::getActivityName() {
+    if (state == IDLE && antifreezeActive) return "ANTIFREEZE";
+    if (state == FLUSHING) return "FLUSH_NORMAL";
+    return stateToString(state);
+}
+
+bool Control::isAntifreezeActive() const {
+    return antifreezeActive;
 }
 
 // 👉 ESTO ES CLAVE PARA MQTT
@@ -152,6 +163,12 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
     bool crudoOK   = ruleInputs[(uint8_t)LogicalInput::RAW_WATER_AVAILABLE];
     bool presionOK = ruleInputs[(uint8_t)LogicalInput::PRESSURE_OK];
 
+    // Recalculado desde cero cada tick — solo case IDLE (rama sin arranque
+    // por demanda) lo vuelve a poner en true. Garantiza que la telemetría
+    // nunca arrastre "antifreeze activo" stale al salir de IDLE por
+    // cualquier vía (demanda, comando, fault_rules, protecciones).
+    antifreezeActive = false;
+
     if (state != lastState) {
         logStateChange(lastState, state);
         lastState = state;
@@ -160,8 +177,6 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
     switch(state) {
 
         case IDLE:
-            stopAll();
-
             {
                 // process_permits["ro"] actúa como interlock en IDLE: aunque haya
                 // demanda y agua cruda, si un permiso externo está bloqueado
@@ -171,9 +186,24 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
                 bool retryWaiting = retryCount > 0 && (millis() - retryTimer < pc.retry_interval_sec * 1000UL);
                 if (demandaOK && crudoOK && permitOk && !retryWaiting) {
                     Serial.println("[EVENT] Demanda detectada -> arranque");
+                    antifreezeAbort();  // cede el control de inmediato — ver antifreeze.h
                     state = STARTING;
                     stateStartTime = millis();
+                    break;
                 }
+
+                // Sin arranque por demanda este tick — protección anti-
+                // congelamiento (prioridad mínima, nunca compite con
+                // producción real). Usa exactamente las mismas condiciones
+                // mínimas (crudoOK/permitOk) que un arranque normal — si un
+                // arranque real tampoco podría ocurrir, antifreeze tampoco
+                // actúa. No-op si antifreeze_enabled=0 (default).
+                antifreezeActive = antifreezeEvaluate(millis(), crudoOK, permitOk);
+            }
+            if (antifreezeActive) {
+                flushOn();
+            } else {
+                stopAll();
             }
             break;
 
@@ -455,13 +485,21 @@ bool Control::isValidTransition(CommandType cmd) const {
         case CommandType::START:
             return state == IDLE;
         case CommandType::STOP:
-            return state == STARTING || state == PRODUCING || state == FLUSHING;
+            // (state==IDLE && antifreezeActive): permite a un operador cancelar
+            // un ciclo de circulación anti-congelamiento en curso — sin esto,
+            // STOP queda rechazado mientras la FSM está "IDLE" aunque las
+            // bombas estén físicamente circulando agua (ver applyCommand()).
+            return state == STARTING || state == PRODUCING || state == FLUSHING
+                || (state == IDLE && antifreezeActive);
         case CommandType::FLUSH:
             return state == PRODUCING;
         case CommandType::RST:
             // Only valid in fault/error states — rejected in IDLE to prevent
             // silent no-ops becoming unsafe if reset behavior gains side-effects.
-            return state == FAULT || state == STARTING || state == FLUSHING;
+            // Excepción: (state==IDLE && antifreezeActive) — mismo criterio que
+            // STOP arriba, permite cancelar un ciclo anti-congelamiento activo.
+            return state == FAULT || state == STARTING || state == FLUSHING
+                || (state == IDLE && antifreezeActive);
         default:
             return false;
     }
@@ -472,12 +510,20 @@ bool Control::isValidTransition(CommandType cmd) const {
 void Control::applyCommand(CommandType cmd) {
     switch (cmd) {
         case CommandType::START:
+            antifreezeAbort();  // cede el control de inmediato — único comando válido desde IDLE
             state = STARTING;
             stateStartTime = millis();
             break;
         case CommandType::STOP:
+            // antifreezeAbort() es no-op si no había ciclo en curso (rama
+            // STARTING/PRODUCING/FLUSHING, comportamiento sin cambios). Si
+            // state==IDLE, solo es alcanzable con antifreezeActive==true (ver
+            // isValidTransition()) — cancela el ciclo y permanece en IDLE.
+            antifreezeAbort();
             // From PRODUCING: flush membrane before halting.
             // From STARTING / FLUSHING: abort immediately.
+            // From IDLE (antifreeze): queda en IDLE — no hay producción que
+            // detener, solo se canceló la circulación de arriba.
             state = (state == PRODUCING) ? FLUSHING : IDLE;
             stateStartTime = millis();
             break;
@@ -487,6 +533,12 @@ void Control::applyCommand(CommandType cmd) {
             stateStartTime = millis();
             break;
         case CommandType::RST:
+            // antifreezeAbort() es no-op si no había ciclo en curso (rama
+            // FAULT/STARTING/FLUSHING, comportamiento sin cambios). Si
+            // state==IDLE, solo es alcanzable con antifreezeActive==true (ver
+            // isValidTransition()) — cancela el ciclo; el resto del reset
+            // (retry/fault flags) es inocuo en ese caso, ya en su default.
+            antifreezeAbort();
             retryCount         = 0;
             faultReason        = FaultReason::NONE;
             flowFaultArmed     = false;

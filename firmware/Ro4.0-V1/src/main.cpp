@@ -9,6 +9,7 @@
 #include "io/io_map.h"
 #include "rules/rules.h"
 #include "control/process_config.h"
+#include "safety/antifreeze.h"
 
 Sensors       sensors;
 Control       control;
@@ -28,6 +29,7 @@ void setup() {
     ioMapApplyPinModes(); // aplica pinMode() para todos los outputs/inputs del io_map
     rulesInit();          // carga motor de reglas desde NVS
     processConfigInit();  // carga parámetros de temporización FSM desde NVS
+    antifreezeConfigInit(); // carga protección anti-congelamiento desde NVS (default: deshabilitada)
     control.begin();      // stopAll() → setOutputs() → ioMapGet() ya disponible
     commands.begin();
     comms.begin(commands, sensors, diagMode, flightRec);
