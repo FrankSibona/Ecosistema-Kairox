@@ -36,6 +36,7 @@ static FlightRecorder* s_flightrec = nullptr;
 // implementaciones en la sección TIMERS/HELPERS).
 extern WiFiManager wm;
 extern bool fallbackPortalActive;
+extern uint8_t lastWifiChannel;
 String fallbackPortalSSID();
 String fallbackPortalPassword();
 
@@ -394,6 +395,7 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
         Serial.printf("[WIFI] Reset solicitado por MQTT (heap libre: %u)\n", ESP.getFreeHeap());
         if (!fallbackPortalActive) {
             wm.setConfigPortalBlocking(false);
+            if (lastWifiChannel > 0) wm.setWiFiAPChannel(lastWifiChannel);
             wm.startConfigPortal(fallbackPortalSSID().c_str(), fallbackPortalPassword().c_str());
             fallbackPortalActive = true;
         }
@@ -434,6 +436,14 @@ static uint8_t wifiCheckHistory[5] = {1,1,1,1,1};  // 1=ok, 0=down; init como "c
 static uint8_t wifiCheckIdx = 0;
 bool fallbackPortalActive   = false;
 unsigned long lastPortalHeapLog = 0;
+
+// Último canal WiFi visto conectado. El ESP32 comparte un único canal de
+// radio entre AP y STA en modo AP_STA: si el portal de fallback abre su AP
+// en un canal distinto al del router, la STA queda físicamente incapacitada
+// de reconectar mientras el portal esté activo, sin importar que la red esté
+// arriba. setWiFiAPChannel() antes de cada startConfigPortal() fija el canal
+// del AP al último canal real del router (0 = sin dato aún, channel-sync off).
+uint8_t lastWifiChannel = 0;
 
 // Flag para forzar re-publish de /state tras reconexión MQTT.
 static bool forceStatePublish = false;
@@ -686,14 +696,16 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
             for (uint8_t i = 0; i < 5; i++) if (wifiCheckHistory[i] == 0) downCount++;
 
             if (!fallbackPortalActive && downCount >= 3) {
-                Serial.printf("[WIFI] %u/5 checks desconectados — portal fallback '%s' (heap libre: %u)\n",
-                    downCount, fallbackPortalSSID().c_str(), ESP.getFreeHeap());
+                Serial.printf("[WIFI] %u/5 checks desconectados — portal fallback '%s' canal=%u (heap libre: %u)\n",
+                    downCount, fallbackPortalSSID().c_str(), lastWifiChannel, ESP.getFreeHeap());
                 wm.setConfigPortalBlocking(false);
+                if (lastWifiChannel > 0) wm.setWiFiAPChannel(lastWifiChannel);
                 wm.startConfigPortal(fallbackPortalSSID().c_str(), fallbackPortalPassword().c_str());
                 fallbackPortalActive = true;
                 lastPortalHeapLog = now;
             }
         } else {
+            lastWifiChannel = WiFi.channel();
             if (!ntpConfigured) {
                 configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
                 ntpConfigured = true;
