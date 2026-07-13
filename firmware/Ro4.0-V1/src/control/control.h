@@ -70,6 +70,15 @@ public:
     const char* getActivityName();
     bool        isAntifreezeActive() const;
 
+    // Lockout remoto: STOP lo latchea, START lo limpia (único camino de
+    // desbloqueo). Persistido en NVS ("kx_ctl"/"lockout") — un equipo detenido
+    // por operador sigue detenido tras un corte de energía. Con lockout activo
+    // el auto-arranque por demanda en IDLE queda inhibido y la protección
+    // anti-congelamiento no inicia ciclos (criterio LOTO: si un operador
+    // detuvo el equipo para intervenirlo, ninguna automatización arranca
+    // bombas). RST NO limpia el lockout.
+    bool isLockedOut() const;
+
     OutputsState getOutputs();
 
     // ── Diagnostic / Flight Recorder getters ────────────────────────────────
@@ -114,6 +123,10 @@ private:
     // true solo mientras case IDLE decide activamente sostener un ciclo de
     // protección anti-congelamiento. Nunca persiste stale fuera de IDLE.
     bool antifreezeActive = false;
+
+    // Ver isLockedOut(). Cargado de NVS en begin(); solo setLockout() lo muta.
+    bool remoteLockout = false;
+    void setLockout(bool on);
 
     // OUTPUTS
     void setOutputs(bool pumpLow, bool pumpHigh, bool flush, bool inlet);

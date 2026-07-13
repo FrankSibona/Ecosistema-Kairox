@@ -3,6 +3,7 @@
 #include "../safety/antifreeze.h"
 #include <config.h>
 #include <string.h>
+#include <Preferences.h>
 
 // ================= SETUP =================
 void Control::begin() {
@@ -10,6 +11,14 @@ void Control::begin() {
     // antes de llamar a begin() — ver main.cpp. stopAll() usa setOutputs() →
     // ioMapGet() que ya está disponible.
     stopAll();
+
+    Preferences p;
+    p.begin("kx_ctl", true);
+    remoteLockout = p.getUChar("lockout", 0) != 0;
+    p.end();
+    if (remoteLockout) {
+        Serial.println("[CTL] LOCKOUT activo (NVS) — auto-arranque inhibido hasta START");
+    }
 }
 
 // ================= GETTERS =================
@@ -63,6 +72,22 @@ const char* Control::getActivityName() {
 
 bool Control::isAntifreezeActive() const {
     return antifreezeActive;
+}
+
+bool Control::isLockedOut() const {
+    return remoteLockout;
+}
+
+// Escritura NVS solo en flanco real (STOP repetido con lockout ya activo es
+// no-op) — evita desgaste de flash por comandos re-entregados.
+void Control::setLockout(bool on) {
+    if (remoteLockout == on) return;
+    remoteLockout = on;
+    Preferences p;
+    p.begin("kx_ctl", false);
+    p.putUChar("lockout", on ? 1 : 0);
+    p.end();
+    Serial.printf("[CTL] LOCKOUT %s\n", on ? "ACTIVADO (STOP)" : "LIBERADO (START)");
 }
 
 // 👉 ESTO ES CLAVE PARA MQTT
@@ -184,7 +209,7 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
                 bool permitOk = evalRule(rulesGet().process_permits[(uint8_t)ProcessId::RO], ruleInputs, ruleDerived);
                 const ProcessConfig& pc = processConfigGet();
                 bool retryWaiting = retryCount > 0 && (millis() - retryTimer < pc.retry_interval_sec * 1000UL);
-                if (demandaOK && crudoOK && permitOk && !retryWaiting) {
+                if (demandaOK && crudoOK && permitOk && !retryWaiting && !remoteLockout) {
                     Serial.println("[EVENT] Demanda detectada -> arranque");
                     antifreezeAbort();  // cede el control de inmediato — ver antifreeze.h
                     state = STARTING;
@@ -197,8 +222,12 @@ void Control::update(Sensors &s, Commands &cmds, const bool* ruleInputs, const b
                 // producción real). Usa exactamente las mismas condiciones
                 // mínimas (crudoOK/permitOk) que un arranque normal — si un
                 // arranque real tampoco podría ocurrir, antifreeze tampoco
-                // actúa. No-op si antifreeze_enabled=0 (default).
-                antifreezeActive = antifreezeEvaluate(millis(), crudoOK, permitOk);
+                // actúa. No-op si antifreeze_enabled=0 (default). Con lockout
+                // activo no se evalúa (LOTO: ninguna automatización arranca
+                // bombas mientras un operador tiene el equipo detenido).
+                if (!remoteLockout) {
+                    antifreezeActive = antifreezeEvaluate(millis(), crudoOK, permitOk);
+                }
             }
             if (antifreezeActive) {
                 flushOn();
@@ -485,12 +514,14 @@ bool Control::isValidTransition(CommandType cmd) const {
         case CommandType::START:
             return state == IDLE;
         case CommandType::STOP:
-            // (state==IDLE && antifreezeActive): permite a un operador cancelar
-            // un ciclo de circulación anti-congelamiento en curso — sin esto,
-            // STOP queda rechazado mientras la FSM está "IDLE" aunque las
-            // bombas estén físicamente circulando agua (ver applyCommand()).
-            return state == STARTING || state == PRODUCING || state == FLUSHING
-                || (state == IDLE && antifreezeActive);
+            // STOP es válido en cualquier estado: además de detener la
+            // producción, latchea remote_lockout (el equipo queda parado hasta
+            // un START explícito). En IDLE latchea (y cancela un eventual ciclo
+            // antifreeze); en FAULT solo latchea y conserva el estado — RST
+            // sigue siendo el único camino de salida de FAULT. Aceptarlo en
+            // FAULT evita la carrera RST→IDLE→auto-arranque antes de que un
+            // STOP posterior llegue por MQTT.
+            return true;
         case CommandType::FLUSH:
             return state == PRODUCING;
         case CommandType::RST:
@@ -510,22 +541,29 @@ bool Control::isValidTransition(CommandType cmd) const {
 void Control::applyCommand(CommandType cmd) {
     switch (cmd) {
         case CommandType::START:
+            setLockout(false);  // único camino de desbloqueo del lockout remoto
             antifreezeAbort();  // cede el control de inmediato — único comando válido desde IDLE
             state = STARTING;
             stateStartTime = millis();
             break;
         case CommandType::STOP:
+            setLockout(true);
             // antifreezeAbort() es no-op si no había ciclo en curso (rama
-            // STARTING/PRODUCING/FLUSHING, comportamiento sin cambios). Si
-            // state==IDLE, solo es alcanzable con antifreezeActive==true (ver
-            // isValidTransition()) — cancela el ciclo y permanece en IDLE.
+            // STARTING/PRODUCING/FLUSHING, comportamiento sin cambios). En
+            // IDLE cancela un eventual ciclo antifreeze en curso.
             antifreezeAbort();
             // From PRODUCING: flush membrane before halting.
             // From STARTING / FLUSHING: abort immediately.
-            // From IDLE (antifreeze): queda en IDLE — no hay producción que
-            // detener, solo se canceló la circulación de arriba.
-            state = (state == PRODUCING) ? FLUSHING : IDLE;
-            stateStartTime = millis();
+            // From IDLE: solo latchea (queda en IDLE).
+            // From FAULT/STOPPING: solo latchea — el estado se conserva
+            // (faultReason/retryCount intactos; RST hace la limpieza).
+            if (state == PRODUCING) {
+                state = FLUSHING;
+                stateStartTime = millis();
+            } else if (state == STARTING || state == FLUSHING || state == IDLE) {
+                state = IDLE;
+                stateStartTime = millis();
+            }
             break;
         case CommandType::FLUSH:
             // Only reachable from PRODUCING (enforced by isValidTransition).
@@ -533,6 +571,8 @@ void Control::applyCommand(CommandType cmd) {
             stateStartTime = millis();
             break;
         case CommandType::RST:
+            // RST NO toca remote_lockout: limpia la falla, no rehabilita
+            // producción. Un equipo bloqueado queda IDLE+lockout tras RST.
             // antifreezeAbort() es no-op si no había ciclo en curso (rama
             // FAULT/STARTING/FLUSHING, comportamiento sin cambios). Si
             // state==IDLE, solo es alcanzable con antifreezeActive==true (ver

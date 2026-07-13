@@ -411,7 +411,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "2.1.0";
+const char* fw_version = "2.2.0";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -800,6 +800,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
             json += "\"state\":\"" + String(c.getStateName()) + "\",";
             json += "\"running\":" + String(c.isRunning()) + ",";
             json += "\"retry\":" + String(c.getRetryCount()) + ",";
+            json += "\"lockout\":" + String(c.isLockedOut() ? 1 : 0) + ",";
             json += "\"fault_reason\":\"" + String(c.getFaultReasonName()) + "\"";
             json += "}";
 
@@ -895,12 +896,18 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
 
     // ================= STATE =================
     static String lastStateSent = "";
+    static int    lastLockoutSent = -1;  // -1 = never sent → forces first publish
 
     String currentState = String(c.getStateName());
+    int    currentLockout = c.isLockedOut() ? 1 : 0;
 
-    if (currentState != lastStateSent || forceStatePublish) {
+    // El lockout también dispara publicación: un STOP recibido en IDLE latchea
+    // sin cambiar el estado FSM — sin esta condición el backend no se entera.
+    if (currentState != lastStateSent || currentLockout != lastLockoutSent
+            || forceStatePublish) {
 
-        lastStateSent = currentState;
+        lastStateSent   = currentState;
+        lastLockoutSent = currentLockout;
         forceStatePublish = false;
 
         String json = "{";
@@ -910,6 +917,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
         json += "\"state\":\"" + currentState + "\",";
         json += "\"running\":" + String(c.isRunning()) + ",";
         json += "\"retry\":" + String(c.getRetryCount()) + ",";
+        json += "\"lockout\":" + String(currentLockout) + ",";
         json += "\"fault_reason\":\"" + String(c.getFaultReasonName()) + "\"";
         json += "}";
 

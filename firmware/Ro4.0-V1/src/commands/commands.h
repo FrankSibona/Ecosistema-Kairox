@@ -22,7 +22,10 @@
 //
 //   FSM protections (in control.cpp) make this safe in practice:
 //     START re-delivered in IDLE  → normal start, physically safe
-//     STOP  re-delivered in IDLE  → REJECTED (invalid FSM state)
+//     STOP  re-delivered in IDLE  → EXECUTED, idempotente (re-latchea
+//       remote_lockout que ya estaba activo — sin escritura NVS extra).
+//       STOP es válido en cualquier estado desde fw 2.2.0: latchea el
+//       lockout remoto; solo START lo libera. Ver Control::isLockedOut().
 //     FLUSH re-delivered in IDLE  → REJECTED (invalid FSM state)
 //     RST   re-delivered in IDLE  → REJECTED ("already_idle")
 //       RST is accepted only in FAULT, STARTING, FLUSHING.
