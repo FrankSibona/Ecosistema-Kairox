@@ -162,6 +162,25 @@
 #define WIFI_FALLBACK_DELAY_SEC  20U     // seg. sin conexión -> abrir portal (debounce)
 #define WIFI_PORTAL_HEAP_LOG_SEC 1800U   // log periódico de heap libre con portal abierto
 
+// Cadencia de reintento de STA mientras el portal de fallback está abierto.
+// WiFiManager deshabilita la interfaz STA al abrir el AP con la STA caída
+// (_disableSTAConn=true), y WiFi.reconnect() es un no-op silencioso en ese
+// estado — sin este reintento explícito (WiFi.begin(), que sí re-habilita STA)
+// el equipo queda en AP-only indefinidamente aunque la red vuelva enseguida.
+// 30s: suficientemente frecuente para recuperar rápido, suficientemente
+// espaciado para no dejar el AP del portal inutilizable (radio compartida).
+#define WIFI_PORTAL_STA_RETRY_SEC 30U
+
+// Timeout del portal FORZADO por comando MQTT fyntek/{id}/wifi/reset (cambio
+// de red planificado desde la plataforma). A diferencia del portal de
+// fallback, este se abre con el equipo normalmente CONECTADO a la red vieja,
+// por lo que no puede cerrarse por WL_CONNECTED — se cierra por este timeout
+// o cuando WiFiManager lo cierra solo al guardar credenciales nuevas.
+// 10 min: margen para que el técnico llegue al equipo, se asocie al AP y
+// complete la carga. Vencido, el equipo vuelve SIEMPRE a operación normal —
+// si quedó sin red, la lógica de fallback lo reabre y reintenta sola.
+#define WIFI_FORCED_PORTAL_TIMEOUT_SEC 600U
+
 // ── NVS antifreeze integrity ──────────────────────────────────────────────────
 // AFREEZE_MAGIC/AFREEZE_VERSION cubren el blob de protección anti-congelamiento
 // (ver src/safety/antifreeze.h) en NVS namespace "kx_afreeze". Mismo patrón que

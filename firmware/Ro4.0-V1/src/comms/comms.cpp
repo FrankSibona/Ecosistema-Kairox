@@ -32,13 +32,11 @@ static Sensors*        s_sensors   = nullptr;
 static DiagMode*       s_diag      = nullptr;
 static FlightRecorder* s_flightrec = nullptr;
 
-// Forward-declarations — usadas por mqttCallback (definido antes de las
-// implementaciones en la sección TIMERS/HELPERS).
-extern WiFiManager wm;
-extern bool fallbackPortalActive;
-extern uint8_t lastWifiChannel;
-String fallbackPortalSSID();
-String fallbackPortalPassword();
+// Pedido de apertura de portal vía comando MQTT fyntek/{id}/wifi/reset.
+// mqttCallback solo levanta el flag; Comms::update() hace el trabajo real
+// (ver el handler de /wifi/reset). Un solo hilo (PubSubClient invoca el
+// callback sincrónicamente desde mqttClient.loop()) — no requiere volatile.
+static bool wifiResetRequested = false;
 
 // Maps ReceiveResult to a human-readable string for field logs.
 // ACCEPTED(0) DUPLICATE(1) BUSY(2) INVALID_JSON(3) UNKNOWN_COMMAND(4)
@@ -393,12 +391,12 @@ static void mqttCallback(char* topic, byte* payload, unsigned int length) {
     snprintf(wifi_topic, sizeof(wifi_topic), "fyntek/%s/wifi/reset", device_id.c_str());
     if (strcmp(topic, wifi_topic) == 0) {
         Serial.printf("[WIFI] Reset solicitado por MQTT (heap libre: %u)\n", ESP.getFreeHeap());
-        if (!fallbackPortalActive) {
-            wm.setConfigPortalBlocking(false);
-            if (lastWifiChannel > 0) wm.setWiFiAPChannel(lastWifiChannel);
-            wm.startConfigPortal(fallbackPortalSSID().c_str(), fallbackPortalPassword().c_str());
-            fallbackPortalActive = true;
-        }
+        // Diferido a Comms::update(): abrir el AP acá implica softAP() +
+        // delay(500) + scan DENTRO del callback de PubSubClient, que corre
+        // mientras se está parseando el paquete entrante sobre el mismo
+        // socket que el portal está por perturbar. Mismo patrón que el ACK
+        // de comandos (se difiere fuera del callback).
+        wifiResetRequested = true;
         return;
     }
 }
@@ -411,7 +409,7 @@ const int mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-const char* fw_version = "2.2.0";
+const char* fw_version = "2.3.0";
 
 // NTP
 const char* ntpServer = "pool.ntp.org";
@@ -434,8 +432,34 @@ unsigned long lastMqttReconnect = 0;
 // Si >= 3 de 5 están desconectados, abre portal.
 static uint8_t wifiCheckHistory[5] = {1,1,1,1,1};  // 1=ok, 0=down; init como "conectado"
 static uint8_t wifiCheckIdx = 0;
+// Portal abierto (cualquiera de los dos modos, ver portalForced).
 bool fallbackPortalActive   = false;
 unsigned long lastPortalHeapLog = 0;
+
+// Modo del portal abierto:
+//   portalForced = false -> FALLBACK: el equipo perdió la red. Se cierra solo
+//                           apenas WiFi.status() vuelve a WL_CONNECTED.
+//   portalForced = true  -> FORZADO por comando MQTT wifi/reset (cambio de red
+//                           planificado desde la plataforma). El equipo suele
+//                           seguir conectado a la red vieja, así que NO puede
+//                           usarse WL_CONNECTED como condición de cierre — se
+//                           cierra por timeout acotado (WIFI_FORCED_PORTAL_
+//                           TIMEOUT_SEC) o cuando WiFiManager lo cierra solo
+//                           tras guardar credenciales nuevas con éxito.
+// El timeout es la garantía dura de que el portal forzado nunca deja al equipo
+// atascado: vencido, se vuelve a operación normal y, si quedó sin red, la
+// lógica de fallback lo reabre y sigue reintentando sola.
+bool portalForced = false;
+unsigned long portalForcedStart = 0;
+
+// Reintento periódico de STA con el portal de fallback abierto. WiFiManager
+// deshabilita la interfaz STA al abrir el AP con la STA caída
+// (_disableSTAConn=true por default), y WiFi.reconnect() es un no-op silencioso
+// con STA deshabilitada (WiFiSTA.cpp: `if(WiFi.getMode() & WIFI_MODE_STA)`).
+// Sin este reintento el equipo queda trabado en AP-only indefinidamente aunque
+// la red original vuelva. WiFi.begin() sí re-habilita STA internamente y
+// reintenta con las credenciales guardadas en NVS.
+unsigned long lastPortalStaRetry = 0;
 
 // Último canal WiFi visto conectado. El ESP32 comparte un único canal de
 // radio entre AP y STA en modo AP_STA: si el portal de fallback abre su AP
@@ -477,6 +501,38 @@ String fallbackPortalSSID() {
 
 String fallbackPortalPassword() {
     return "kairox2026";
+}
+
+// ── Portal: apertura / cierre ────────────────────────────────────────────────
+// Único punto de apertura para ambos modos (fallback y forzado) — evita que
+// las dos rutas queden con inicializaciones distintas de los timers.
+static void portalOpen(unsigned long now, bool forced) {
+    wm.setConfigPortalBlocking(false);
+    if (lastWifiChannel > 0) wm.setWiFiAPChannel(lastWifiChannel);
+    wm.startConfigPortal(fallbackPortalSSID().c_str(), fallbackPortalPassword().c_str());
+    fallbackPortalActive = true;
+    portalForced         = forced;
+    portalForcedStart    = now;
+    lastPortalHeapLog    = now;
+    lastPortalStaRetry   = now;  // primer reintento de STA recién en +WIFI_PORTAL_STA_RETRY_SEC
+}
+
+// Limpia el estado local del portal. NO toca WiFiManager — usar cuando el
+// portal ya fue cerrado por la propia librería.
+static void portalMarkClosed() {
+    fallbackPortalActive = false;
+    portalForced         = false;
+    ntpConfigured        = false;  // forzar re-sync NTP en el próximo ciclo
+}
+
+// Cierra el portal en WiFiManager y deja la STA armada. El WiFi.begin() final
+// es la garantía de prioridad: pase lo que pase, al salir del portal el equipo
+// queda intentando reconectar con las credenciales de NVS.
+static void portalShutdown() {
+    wm.stopConfigPortal();
+    WiFi.mode(WIFI_STA);
+    portalMarkClosed();
+    if (WiFi.status() != WL_CONNECTED) WiFi.begin();
 }
 
 // ================= HELPERS =================
@@ -574,6 +630,13 @@ void setupWiFi() {
 void Comms::reconnect() {
 
     if (mqttClient.connected()) return;
+
+    // Sin ruta de red, mqttClient.connect() bloquea el loop hasta
+    // MQTT_SOCKET_TIMEOUT_SEC en cada intento (cada 5s). Eso atrasa el chequeo
+    // de WiFi y el reintento de STA del portal — exactamente lo que hace falta
+    // que corra a tiempo durante un corte. Sin WiFi no hay MQTT posible: se
+    // sale barato.
+    if (WiFi.status() != WL_CONNECTED) return;
 
     unsigned long now = millis();
     if (now - lastMqttReconnect < 5000) return;
@@ -688,9 +751,15 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
         wifiCheckIdx = (wifiCheckIdx + 1) % 5;
 
         if (!wifiOk) {
-            Serial.println("[COMMS] WiFi reconectando...");
-            WiFi.reconnect();
             ntpConfigured = false;
+
+            // Con el portal abierto, la reconexión de STA la maneja el bloque
+            // WIFI FALLBACK PORTAL (WiFi.begin(), re-habilita STA). Llamar
+            // WiFi.reconnect() acá sería un no-op y confundiría el log.
+            if (!fallbackPortalActive) {
+                Serial.println("[COMMS] WiFi reconectando...");
+                WiFi.reconnect();
+            }
 
             uint8_t downCount = 0;
             for (uint8_t i = 0; i < 5; i++) if (wifiCheckHistory[i] == 0) downCount++;
@@ -698,11 +767,7 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
             if (!fallbackPortalActive && downCount >= 3) {
                 Serial.printf("[WIFI] %u/5 checks desconectados — portal fallback '%s' canal=%u (heap libre: %u)\n",
                     downCount, fallbackPortalSSID().c_str(), lastWifiChannel, ESP.getFreeHeap());
-                wm.setConfigPortalBlocking(false);
-                if (lastWifiChannel > 0) wm.setWiFiAPChannel(lastWifiChannel);
-                wm.startConfigPortal(fallbackPortalSSID().c_str(), fallbackPortalPassword().c_str());
-                fallbackPortalActive = true;
-                lastPortalHeapLog = now;
+                portalOpen(now, false);
             }
         } else {
             lastWifiChannel = WiFi.channel();
@@ -714,29 +779,92 @@ void Comms::update(Sensors &s, Control &c, Commands &cmds, DiagMode &diag, Fligh
         }
     }
 
-    // ===== WIFI FALLBACK PORTAL =====
+    // ===== WIFI PORTAL (fallback + forzado) =====
     // wm.process() se llama cada loop (no solo cada 10s) para que el
     // webserver/DNS del portal cautivo respondan con latencia aceptable.
-    // Sin timeout propio: queda abierto mientras dure la desconexión y se
-    // cierra apenas WiFi.status() vuelve a WL_CONNECTED (red original via
-    // STA en background, o credenciales nuevas cargadas desde el portal).
+    // Dos modos con criterios de cierre distintos — ver portalForced en la
+    // sección TIMERS. En ambos, el portal nunca puede quedar abierto de forma
+    // indefinida bloqueando la reconexión: el fallback cierra al recuperar la
+    // red y el forzado cierra por timeout.
+    //
+    // Pedido de portal forzado vía comando MQTT (diferido desde mqttCallback).
+    // Se procesa acá, antes del bloque del portal, para que el primer
+    // wm.process() ocurra en esta misma iteración.
+    if (wifiResetRequested) {
+        wifiResetRequested = false;
+        if (fallbackPortalActive) {
+            Serial.println("[WIFI] wifi/reset ignorado — portal ya activo");
+        } else {
+            Serial.printf("[WIFI] Portal FORZADO por comando — '%s' canal=%u, timeout %us (heap libre: %u)\n",
+                fallbackPortalSSID().c_str(), lastWifiChannel,
+                (unsigned)WIFI_FORCED_PORTAL_TIMEOUT_SEC, ESP.getFreeHeap());
+            portalOpen(now, true);
+        }
+    }
+
     if (fallbackPortalActive) {
         wm.process();
+
+        // ── Condiciones de cierre ───────────────────────────────────────────
+        if (!wm.getConfigPortalActive()) {
+            // WiFiManager cerró el portal por su cuenta: es lo que hace al
+            // guardar credenciales nuevas y conectar con éxito
+            // (_disableConfigPortal=true). Hay que sincronizar el flag SIN
+            // llamar stopConfigPortal(): sobre un portal ya cerrado,
+            // shutdownConfigPortal() usa server->handleClient()
+            // (WiFiManager.cpp:970) ANTES de chequear configPortalActive, y el
+            // cierre previo hizo server.reset() -> desreferencia de puntero
+            // nulo -> panic y reboot en pleno cambio de red.
+            portalMarkClosed();
+            Serial.printf("[WIFI] Portal cerrado por WiFiManager — credenciales nuevas activas (heap libre: %u)\n",
+                ESP.getFreeHeap());
+        }
+        else if (portalForced) {
+            // Portal forzado: el equipo puede seguir conectado a la red vieja,
+            // así que WL_CONNECTED no sirve como criterio de cierre. Cierra por
+            // timeout — garantía dura de volver siempre a operación normal.
+            if (now - portalForcedStart >= (WIFI_FORCED_PORTAL_TIMEOUT_SEC * 1000UL)) {
+                Serial.printf("[WIFI] Portal forzado expirado (%us) — cerrando (heap libre: %u)\n",
+                    (unsigned)WIFI_FORCED_PORTAL_TIMEOUT_SEC, ESP.getFreeHeap());
+                portalShutdown();
+            }
+        }
+        else if (WiFi.status() == WL_CONNECTED) {
+            // Portal de fallback: la red volvió por su cuenta.
+            Serial.printf("[WIFI] Portal fallback cerrado — reconectado (heap libre: %u)\n",
+                ESP.getFreeHeap());
+            portalShutdown();
+        }
+    }
+
+    // ── Portal abierto: reintento de STA + log de heap ───────────────────────
+    // Separado del bloque de cierre para no ejecutarse sobre un portal que
+    // acaba de cerrarse en esta misma iteración.
+    if (fallbackPortalActive) {
+
+        // Prioridad: que el equipo vuelva solo. Con el portal de fallback,
+        // WiFiManager dejó la STA deshabilitada y WiFi.reconnect() es un no-op
+        // — WiFi.begin() re-habilita la interfaz y reintenta con las
+        // credenciales de NVS. Sin esto el portal queda abierto para siempre
+        // aunque la red vuelva a los 5 segundos.
+        // Solo cuando NO hay conexión: en portal forzado sobre la red vieja
+        // (STA arriba, MQTT operativo) un begin() cortaría la conexión viva.
+        // Trade-off aceptado: cada reintento puede dejar el AP del portal
+        // momentáneamente sin responder (radio compartida STA/AP).
+        if (WiFi.status() != WL_CONNECTED &&
+                now - lastPortalStaRetry >= (WIFI_PORTAL_STA_RETRY_SEC * 1000UL)) {
+            lastPortalStaRetry = now;
+            Serial.printf("[WIFI] Portal activo — reintentando STA con credenciales guardadas (heap libre: %u)\n",
+                ESP.getFreeHeap());
+            WiFi.begin();
+        }
 
         // Log periódico de heap libre — visibilidad para validar estabilidad
         // en cortes prolongados (ver WIFI_PORTAL_HEAP_LOG_SEC en config.h).
         if (now - lastPortalHeapLog >= (WIFI_PORTAL_HEAP_LOG_SEC * 1000UL)) {
             lastPortalHeapLog = now;
-            Serial.printf("[WIFI] Portal fallback activo — heap libre: %u\n", ESP.getFreeHeap());
-        }
-
-        if (WiFi.status() == WL_CONNECTED) {
-            wm.stopConfigPortal();
-            WiFi.mode(WIFI_STA);
-            fallbackPortalActive = false;
-            ntpConfigured = false;  // forzar re-sync NTP en el próximo ciclo
-            Serial.printf("[WIFI] Portal fallback cerrado — reconectado (heap libre: %u)\n",
-                ESP.getFreeHeap());
+            Serial.printf("[WIFI] Portal %s activo — heap libre: %u\n",
+                portalForced ? "forzado" : "fallback", ESP.getFreeHeap());
         }
     }
 
